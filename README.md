@@ -5,21 +5,7 @@ instance and its GPU in real time. Hand-rolled braille charts, a responsive
 curses layout, and a non-blocking background poller so the UI never stalls on
 network or NVML latency.
 
-```
-╭─┐¹ gpu ┌──────────────────────────────────────────────────────────────────╮
-│ NVIDIA GeForce RTX 5090   util  86%   50°C  319/600W  SM 2857MHz  fan 31%   │
-│ ⣿⣿⣿⣿ … braille utilisation chart …                                          │
-│ VRAM 27.3GB/31.8GB ████████████████████░░░  86%                             │
-│ PWR  ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  53%                             │
-╰─────────────────────────────────────────────────────────────────────────────╯
-╭─┐² throughput ┌────────────╮╭─┐³ requests ┌──────────────╮
-│ gen 149 tok/s   ⣀⣤⣶⣿        ││ running ████░░ 1            │
-│ prompt 3.5k tok/s          ││ waiting ██████ 2            │
-╰─┘ tok/s └──────────────────╯╰─┘ queue └───────────────────╯
-╭─┐⁴ latency ┌───────────────╮╭─┐⁵ cache ┌──────────────────╮
-│ TTFT 964ms  TPOT 6ms …     ││ KV █░░░  3%  prefix 0.0%    │
-╰─┘ recent avg └─────────────╯╰─────────────────────────────╯
-```
+![tui](docs/ui.png)
 
 Rounded corners, superscript panel numbers in the title tabs, and a secondary
 label on the bottom edge — matching [btop](https://github.com/aristocratos/btop)'s box style.
