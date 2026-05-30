@@ -12,7 +12,37 @@ from vllmpytop.state import (
     histogram_quantile,
     histogram_recent_avg,
 )
-from vllmpytop.ui.widgets import braille_chart
+from vllmpytop.ui.widgets import braille_chart, fmt_duration, stacked_chart_down
+
+
+def test_braille_chart_flip():
+    # A quarter-height value lights one dot-row: the bottom one normally, the
+    # top one when flipped (for the lower half of a mirrored chart).
+    kw = dict(width=1, height=1, vmin=0.0, vmax=1.0, baseline=False)
+    normal = braille_chart([0.25], **kw)[0]
+    flipped = braille_chart([0.25], flip=True, **kw)[0]
+    assert normal != flipped
+    assert ord(normal) - 0x2800 == 0x80  # bottom dot of the right column
+    assert ord(flipped) - 0x2800 == 0x08  # top dot of the right column
+
+
+def test_stacked_chart_down_bands():
+    # near dominates the cell -> band 0; far dominates -> band 1; empty -> -1.
+    g = stacked_chart_down([1.0], [0.0], width=1, height=1, vmax=1.0)
+    assert g[0][0][1] == 0
+    g = stacked_chart_down([0.0], [1.0], width=1, height=1, vmax=1.0)
+    assert g[0][0][1] == 1
+    g = stacked_chart_down([], [], width=1, height=1, vmax=1.0)
+    assert g[0][0] == (" ", -1)
+
+
+def test_fmt_duration():
+    assert fmt_duration(45) == "45s"
+    assert fmt_duration(12 * 60) == "12m"
+    assert fmt_duration(3 * 3600 + 20 * 60) == "3h 20m"
+    assert fmt_duration(2 * 86400 + 4 * 3600) == "2d 4h"
+    assert fmt_duration(-1) == "—"
+    assert fmt_duration(float("inf")) == "—"
 
 
 def test_compute_rate_basic():

@@ -22,6 +22,7 @@ _SCALAR_NAMES = (
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
     "vllm:kv_cache_usage_perc",
+    "vllm:request_success_total",
 )
 
 # Histogram base names -> attribute on VllmSnapshot.
@@ -60,10 +61,40 @@ def parse_metrics(text: str) -> VllmSnapshot:
         for sample in family.samples:
             name = sample.name
             value = sample.value
+            labels = sample.labels
             if snap.model_name is None:
-                mn = sample.labels.get("model_name")
+                mn = labels.get("model_name")
                 if mn:
                     snap.model_name = mn
+
+            # Process start time (stdlib process collector) -> uptime.
+            if name == "process_start_time_seconds":
+                snap.process_start_time = value
+                continue
+
+            # CacheConfig is exposed as a single info gauge whose labels carry
+            # the interesting config (KV-cache dtype, block size, etc.).
+            if name == "vllm:cache_config_info":
+                snap.cache_dtype = labels.get("cache_dtype") or snap.cache_dtype
+                snap.block_size = labels.get("block_size") or snap.block_size
+                snap.num_gpu_blocks = (
+                    labels.get("num_gpu_blocks") or snap.num_gpu_blocks
+                )
+                snap.gpu_memory_utilization = (
+                    labels.get("gpu_memory_utilization")
+                    or snap.gpu_memory_utilization
+                )
+                epc = labels.get("enable_prefix_caching")
+                if epc is not None:
+                    snap.enable_prefix_caching = epc == "True"
+                continue
+
+            # Engine sleep state: awake=1 means the engine is serving.
+            if name == "vllm:engine_sleep_state" and labels.get(
+                "sleep_state"
+            ) == "awake":
+                snap.engine_awake = value == 1.0
+                continue
 
             if name in scalars:
                 scalars[name] += value
@@ -91,6 +122,7 @@ def parse_metrics(text: str) -> VllmSnapshot:
     snap.num_requests_running = scalars["vllm:num_requests_running"]
     snap.num_requests_waiting = scalars["vllm:num_requests_waiting"]
     snap.kv_cache_usage_perc = scalars["vllm:kv_cache_usage_perc"]
+    snap.request_success_total = scalars["vllm:request_success_total"]
 
     for base, attr in _HISTOGRAMS.items():
         setattr(snap, attr, hists[base])

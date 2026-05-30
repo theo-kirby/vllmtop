@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Optional
 
+from ..collectors.access_log import AccessLogTailer
 from ..collectors.gpu import GpuCollector
 from ..collectors.vllm import VllmCollector
 from ..config import AppConfig
@@ -34,11 +35,13 @@ PANELS = (
 class Poller(threading.Thread):
     """Background thread that takes snapshots without blocking the UI."""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig,
+                 tailer: Optional[AccessLogTailer] = None) -> None:
         super().__init__(daemon=True)
         self.config = config
         self.vllm = VllmCollector(config.metrics_url, config.http_timeout)
         self.gpu = None if config.no_gpu else GpuCollector(config.gpu_index)
+        self.tailer = tailer
         self._lock = threading.Lock()
         self._latest: Optional[Snapshot] = None
         self._stop = threading.Event()
@@ -49,8 +52,10 @@ class Poller(threading.Thread):
         gsnap = self.gpu.poll() if self.gpu is not None else GpuSnapshot(
             available=False
         )
+        access = self.tailer.snapshot() if self.tailer is not None else []
+        err = self.tailer.error if self.tailer is not None else None
         return Snapshot(monotonic=time.monotonic(), vllm=self.vllm.poll(),
-                        gpu=gsnap)
+                        gpu=gsnap, access_log=access, access_error=err)
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -96,7 +101,11 @@ class App:
         self.config = config
         self.theme = Theme()
         self.history = History(config.history_len)
-        self.poller = Poller(config)
+        self.tailer = (
+            AccessLogTailer(file=config.log_file, docker=config.docker_container)
+            if config.has_log_source else None
+        )
+        self.poller = Poller(config, self.tailer)
         self.show_help = False
         self.last: Optional[Snapshot] = None
         self.last_update_t = 0.0
@@ -108,12 +117,16 @@ class App:
             self.enabled.discard("gpu")
 
     def run(self) -> int:
+        if self.tailer is not None:
+            self.tailer.start()
         self.poller.start()
         try:
             return curses.wrapper(self._loop)
         finally:
             self.poller.stop()
             self.poller.close()
+            if self.tailer is not None:
+                self.tailer.stop()
 
     def _loop(self, stdscr) -> int:
         curses.curs_set(0)
@@ -212,6 +225,7 @@ class App:
             "  h / ?      toggle this help",
             "",
             "Panels: ¹gpu  ²throughput  ³requests  ⁴latency  ⁵cache",
+            "  (gpu shows the model; requests shows the live call feed)",
             "",
             "press any key to close",
         ]

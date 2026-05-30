@@ -40,3 +40,19 @@ def test_prefix_cache_hit_rate_guarded():
     snap = _snap()
     # queries_total is 0 in the fixture -> guarded to 0, no ZeroDivisionError.
     assert snap.prefix_cache_hit_rate == 0.0
+
+
+def test_engine_info_parsed():
+    snap = _snap()
+    # Pulled from the labels on vllm:cache_config_info.
+    assert snap.cache_dtype == "fp8"
+    assert snap.block_size == "16"
+    assert snap.num_gpu_blocks == "144"
+    assert snap.gpu_memory_utilization == "0.88"
+    assert snap.enable_prefix_caching is False
+    # process_start_time_seconds gauge from the stdlib process collector.
+    assert snap.process_start_time == 1.77995408251e09
+    # engine_sleep_state{sleep_state="awake"} == 1.0
+    assert snap.engine_awake is True
+    # request_success_total summed across finished_reason labels (12218 + 0s).
+    assert snap.request_success_total == 12218.0

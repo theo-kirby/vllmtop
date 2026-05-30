@@ -24,10 +24,22 @@ vllmtop                  # or vllmpytop
 ## What it shows
 
 - **GPU** (via NVML / `pynvml`): utilisation %, VRAM used/total, temperature,
-  power draw vs. limit, SM clock, fan — with green/yellow/red thresholds.
+  power draw vs. limit, SM clock, fan — with green/yellow/red thresholds. Its
+  chart is a btop-style **mirrored graph**: GPU utilisation grows up from a
+  centre line, and the request count grows down from it as a stacked two-band
+  series — running (green) nearest the centre, waiting (magenta) beyond. The same panel
+  folds in a compact **vLLM** summary: the served model, uptime, KV-cache
+  precision (`cache_dtype`), requests served, prefix-caching on/off, KV blocks,
+  GPU-memory target, and engine awake/sleeping state.
 - **Throughput**: generation tok/s and prompt tok/s (rates derived from vLLM
-  counters), as big numbers + braille charts.
-- **Requests / Queue**: running vs. waiting requests and preemptions.
+  counters), as a mirrored chart — gen (green) grows up from the centre line,
+  prompt/prefill (cyan) grows down — each labelled with its current value.
+- **Requests / Queue**: running vs. waiting request bars, and — when a log
+  source is configured (`--docker <container>` or `--log-file <path>`) — a live
+  feed beneath them of the HTTP calls vLLM serves: age, status, method,
+  endpoint, client, newest first (like btop's process list). This is the
+  request *envelope* only — vLLM doesn't log prompt/response text unless started
+  with `--enable-log-requests`, so no prompt text is shown.
 - **Latency** (recent average over the last poll interval — far more useful live
   than the cumulative average): TTFT, inter-token (TPOT), end-to-end, queue time.
 - **Cache**: KV-cache usage % and prefix-cache hit rate.
@@ -70,7 +82,8 @@ vllmtop                            # monitor http://localhost:8000
 vllmtop --url http://host:8000     # a remote vLLM server
 vllmtop --interval 0.5             # poll twice a second
 vllmtop --no-gpu                   # skip the GPU panel
-vllmpytop                          # full name as an equivalent alias
+vllmtop --docker vllm-server       # + call feed in the requests panel (docker logs)
+vllmtop --log-file /var/log/vllm.log   # + call feed from a log file
 python -m vllmpytop                # same thing, without the entry point
 ```
 
@@ -84,6 +97,8 @@ The server URL can also be set via the `VLLMTOP_URL` environment variable.
 | `--interval` | `1.0` | poll interval in seconds |
 | `--gpu-index` | `0` | NVML GPU index |
 | `--no-gpu` | off | disable the GPU panel |
+| `--docker` | — | stream `docker logs -f <container>` for the requests call feed |
+| `--log-file` | — | tail this access-log file for the requests call feed (env `VLLMTOP_LOG_FILE`) |
 | `--dump-json` | off | collect one snapshot, print JSON, exit (no TTY) |
 
 ### Keybindings

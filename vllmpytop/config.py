@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 DEFAULT_URL = "http://localhost:8000"
 DEFAULT_INTERVAL = 1.0
@@ -24,11 +25,21 @@ class AppConfig:
     no_gpu: bool = False
     history_len: int = HISTORY_LEN
     http_timeout: float = HTTP_TIMEOUT
+    # Activity panel: tail a log file or stream a container's `docker logs`.
+    log_file: Optional[str] = None
+    docker_container: Optional[str] = None
 
     @property
     def metrics_url(self) -> str:
         return self.url.rstrip("/") + "/metrics"
 
+    @property
+    def has_log_source(self) -> bool:
+        return bool(self.log_file or self.docker_container)
+
     @classmethod
     def from_env(cls) -> "AppConfig":
-        return cls(url=os.environ.get("VLLMTOP_URL", DEFAULT_URL))
+        return cls(
+            url=os.environ.get("VLLMTOP_URL", DEFAULT_URL),
+            log_file=os.environ.get("VLLMTOP_LOG_FILE"),
+        )

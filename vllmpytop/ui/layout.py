@@ -36,8 +36,18 @@ def _split(start: int, total: int, n: int) -> list[tuple[int, int]]:
     return out
 
 
-# Order the grid panels appear in; GPU is laid out separately (full width).
-GRID_ORDER = ("throughput", "requests", "latency", "cache")
+# The grid below the GPU panel is two columns. `requests` gets a column to
+# itself so it's tall enough for its per-request list; the rest stack opposite.
+GRID_LEFT = ("throughput", "latency", "cache")
+GRID_RIGHT = ("requests",)
+GRID_ORDER = GRID_LEFT + GRID_RIGHT
+
+
+def _place_column(panels: Dict[str, "Rect"], names, x: int, w: int,
+                  y: int, h: int) -> None:
+    """Stack `names` vertically within the column at (x, w), spanning (y, h)."""
+    for name, (ry, rh) in zip(names, _split(y, h, len(names))):
+        panels[name] = Rect(ry, x, rh, w)
 
 
 def compute_layout(lines: int, cols: int, enabled) -> Layout:
@@ -59,8 +69,10 @@ def compute_layout(lines: int, cols: int, enabled) -> Layout:
 
     panels: Dict[str, Rect] = {}
 
+    # The GPU panel is taller than a single grid cell because its stats column
+    # also carries the compact vLLM model summary.
     if gpu_on and grid:
-        gpu_h = max(7, int(body_h * 0.38))
+        gpu_h = max(9, int(body_h * 0.5))
     elif gpu_on:
         gpu_h = body_h
     else:
@@ -73,13 +85,13 @@ def compute_layout(lines: int, cols: int, enabled) -> Layout:
     grid_h = body_h - gpu_h
 
     if grid and grid_h > 0:
-        nrows = (len(grid) + 1) // 2
-        idx = 0
-        for ry, rh in _split(grid_y, grid_h, nrows):
-            remaining = len(grid) - idx
-            ncols = 2 if remaining >= 2 else 1
-            for cx, cw in _split(0, body_w, ncols):
-                panels[grid[idx]] = Rect(ry, cx, rh, cw)
-                idx += 1
+        left = [n for n in GRID_LEFT if n in enabled]
+        right = [n for n in GRID_RIGHT if n in enabled]
+        if left and right:
+            (lx, lw), (rx, rw) = _split(0, body_w, 2)
+            _place_column(panels, left, lx, lw, grid_y, grid_h)
+            _place_column(panels, right, rx, rw, grid_y, grid_h)
+        else:  # only one column populated -> it spans the full width
+            _place_column(panels, left or right, 0, body_w, grid_y, grid_h)
 
     return Layout(panels=panels, too_small=False)

@@ -39,6 +39,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--no-gpu", action="store_true", help="disable the GPU panel")
     p.add_argument(
+        "--log-file", default=os.environ.get("VLLMTOP_LOG_FILE"),
+        metavar="PATH",
+        help="tail this file (uvicorn access log) for the activity panel "
+             "(env VLLMTOP_LOG_FILE)",
+    )
+    p.add_argument(
+        "--docker", metavar="CONTAINER", default=None,
+        help="stream `docker logs -f` from this container for the activity panel",
+    )
+    p.add_argument(
         "--dump-json", action="store_true",
         help="collect a snapshot, print it as JSON, and exit (no TTY needed)",
     )
@@ -51,6 +61,8 @@ def _config_from_args(args: argparse.Namespace) -> AppConfig:
         interval=max(0.1, args.interval),
         gpu_index=args.gpu_index,
         no_gpu=args.no_gpu,
+        log_file=args.log_file,
+        docker_container=args.docker,
     )
 
 
@@ -87,6 +99,16 @@ def dump_json(config: AppConfig) -> int:
         "gpu_available": second.gpu.available,
         "gpu_error": second.gpu.error,
         "derived": history.derived,
+        "vllm_info": {
+            "process_start_time": second.vllm.process_start_time,
+            "cache_dtype": second.vllm.cache_dtype,
+            "block_size": second.vllm.block_size,
+            "gpu_memory_utilization": second.vllm.gpu_memory_utilization,
+            "num_gpu_blocks": second.vllm.num_gpu_blocks,
+            "enable_prefix_caching": second.vllm.enable_prefix_caching,
+            "engine_awake": second.vllm.engine_awake,
+            "request_success_total": second.vllm.request_success_total,
+        },
         "raw_vllm": {
             "num_requests_running": second.vllm.num_requests_running,
             "num_requests_waiting": second.vllm.num_requests_waiting,

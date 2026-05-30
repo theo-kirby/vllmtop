@@ -52,6 +52,15 @@ class VllmSnapshot:
     error: Optional[str] = None
     model_name: Optional[str] = None
 
+    # Engine / config info (from labels on info-style metrics).
+    process_start_time: Optional[float] = None  # unix epoch; for uptime
+    cache_dtype: Optional[str] = None  # KV-cache precision, e.g. "fp8"
+    block_size: Optional[str] = None
+    gpu_memory_utilization: Optional[str] = None  # configured target, e.g. "0.88"
+    num_gpu_blocks: Optional[str] = None
+    enable_prefix_caching: Optional[bool] = None
+    engine_awake: Optional[bool] = None
+
     # Counters
     generation_tokens_total: float = 0.0
     prompt_tokens_total: float = 0.0
@@ -59,6 +68,7 @@ class VllmSnapshot:
     num_preemptions_total: float = 0.0
     prefix_cache_hits_total: float = 0.0
     prefix_cache_queries_total: float = 0.0
+    request_success_total: float = 0.0  # summed across finish reasons
 
     # Gauges
     num_requests_running: float = 0.0
@@ -111,12 +121,34 @@ class GpuSnapshot:
 
 
 @dataclass
+class AccessLogEntry:
+    """One parsed uvicorn access-log line (an HTTP call vLLM served).
+
+    Built from the server's logs, not its metrics — so it carries no prompt or
+    response text, only the request envelope: who called, which endpoint, the
+    status, and when we observed it.
+    """
+
+    t: float  # wall-clock time we read the line (time.time())
+    client: str  # "ip:port"
+    method: str  # "POST"
+    path: str  # "/v1/chat/completions"
+    status: int  # 200
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status < 400
+
+
+@dataclass
 class Snapshot:
     """A combined vLLM + GPU sample taken at one monotonic instant."""
 
     monotonic: float
     vllm: VllmSnapshot
     gpu: GpuSnapshot
+    access_log: List[AccessLogEntry] = field(default_factory=list)
+    access_error: Optional[str] = None
 
 
 def compute_rate(
