@@ -1,7 +1,7 @@
 import math
 from pathlib import Path
 
-from vllmtop.collectors.vllm import parse_metrics
+from vllmpytop.collectors.vllm import parse_metrics
 
 FIXTURE = Path(__file__).parent / "metrics_fixture.txt"
 

@@ -1,4 +1,4 @@
-from vllmtop.cli import main
+from vllmpytop.cli import main
 
 if __name__ == "__main__":
     main()

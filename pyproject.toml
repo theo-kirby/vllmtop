@@ -3,25 +3,49 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllmtop"
-version = "0.1.0"
+name = "vllmpytop"
+version = "0.1.1"
 description = "A btop-style terminal UI for monitoring a vLLM instance and its GPU in real time."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Theodore Kirby", email = "theo@kirby.dev" }]
+keywords = ["vllm", "gpu", "monitoring", "tui", "terminal", "btop", "nvml", "prometheus", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Topic :: Utilities",
+]
 dependencies = [
     "nvidia-ml-py>=12.0",
     "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/theo-kirby/vllmtop"
+Repository = "https://github.com/theo-kirby/vllmtop"
+Issues = "https://github.com/theo-kirby/vllmtop/issues"
 
 [project.scripts]
-vllmtop = "vllmtop.cli:main"
+vllmpytop = "vllmpytop.cli:main"
+vllmtop = "vllmpytop.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["vllmtop*"]
+include = ["vllmpytop*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,4 +1,4 @@
-# vllmtop
+# vllmpytop
 
 A **btop-style terminal UI** for monitoring a running [vLLM](https://github.com/vllm-project/vllm)
 instance and its GPU in real time. Hand-rolled braille charts, a responsive
@@ -45,10 +45,14 @@ Requires Python 3.10+ on Linux (curses is stdlib). A working NVIDIA driver is
 needed for the GPU panel.
 
 ```bash
+pip install vllmpytop
+# or from a checkout:
 pip install .
 # or, for development:
 pip install -e ".[dev]"
 ```
+
+This installs two equivalent commands — `vllmpytop` and the shorter alias `vllmtop`.
 
 Dependencies: `nvidia-ml-py` (NVML bindings) and `prometheus-client` (exposition
 parser). The `/metrics` fetch uses stdlib `urllib`.
@@ -56,11 +60,12 @@ parser). The `/metrics` fetch uses stdlib `urllib`.
 ## Usage
 
 ```bash
-vllmtop                              # monitor http://localhost:8000
-vllmtop --url http://host:8000       # a remote vLLM server
-vllmtop --interval 0.5               # poll twice a second
-vllmtop --no-gpu                     # skip the GPU panel
-python -m vllmtop                    # same thing, without the entry point
+vllmpytop                            # monitor http://localhost:8000
+vllmpytop --url http://host:8000     # a remote vLLM server
+vllmpytop --interval 0.5             # poll twice a second
+vllmpytop --no-gpu                   # skip the GPU panel
+vllmtop                              # 'vllmtop' is an equivalent alias
+python -m vllmpytop                  # same thing, without the entry point
 ```
 
 The server URL can also be set via the `VLLMTOP_URL` environment variable.
@@ -95,7 +100,7 @@ prints the result as JSON, and exits. Works without a TTY — handy for CI or
 verifying connectivity:
 
 ```bash
-python -m vllmtop --dump-json --url http://localhost:8000
+python -m vllmpytop --dump-json --url http://localhost:8000
 ```
 
 ## How it works

@@ -22,7 +22,6 @@ def _build_parser() -> argparse.ArgumentParser:
     import os
 
     p = argparse.ArgumentParser(
-        prog="vllmtop",
         description="A btop-style TUI for monitoring a vLLM instance and its GPU.",
     )
     p.add_argument(

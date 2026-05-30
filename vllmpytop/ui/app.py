@@ -203,7 +203,7 @@ class App:
     def _draw_help(self, p: Painter, lines: int, cols: int) -> None:
         t = self.theme
         body = [
-            "vllmtop — keybindings",
+            "vllmpytop — keybindings",
             "",
             "  q / Esc    quit",
             "  + / -      faster / slower refresh",

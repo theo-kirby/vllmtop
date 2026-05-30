@@ -1,7 +1,7 @@
 import math
 
-from vllmtop.config import HISTORY_LEN
-from vllmtop.state import (
+from vllmpytop.config import HISTORY_LEN
+from vllmpytop.state import (
     GpuSnapshot,
     Histogram,
     History,
@@ -12,7 +12,7 @@ from vllmtop.state import (
     histogram_quantile,
     histogram_recent_avg,
 )
-from vllmtop.ui.widgets import braille_chart
+from vllmpytop.ui.widgets import braille_chart
 
 
 def test_compute_rate_basic():
