@@ -1,14 +1,25 @@
-# vllmpytop
+# vllmtop/vllmpytop
 
-A **btop-style terminal UI** for monitoring a running [vLLM](https://github.com/vllm-project/vllm)
-instance and its GPU in real time. Hand-rolled braille charts, a responsive
+[![PyPI](https://img.shields.io/pypi/v/vllmpytop.svg)](https://pypi.org/project/vllmpytop/)
+[![Python versions](https://img.shields.io/pypi/pyversions/vllmpytop.svg)](https://pypi.org/project/vllmpytop/)
+[![License: MIT](https://img.shields.io/pypi/l/vllmpytop.svg)](https://github.com/theo-kirby/vllmtop/blob/main/LICENSE)
+
+Inspired by the excellent tui style and functionallity of [btop](https://github.com/aristocratos/btop),
+vllmtop is a cli resource montior for monitoring a [vLLM](https://github.com/vllm-project/vllm)
+instance and its GPU in real time. Simple braille charts, a responsive
 curses layout, and a non-blocking background poller so the UI never stalls on
 network or NVML latency.
 
 ![tui](docs/ui.png)
 
-Rounded corners, superscript panel numbers in the title tabs, and a secondary
-label on the bottom edge — matching [btop](https://github.com/aristocratos/btop)'s box style.
+## Quickstart
+
+```bash
+pip install vllmpytop    # install from pypi
+vllmtop                  # or vllmpytop
+
+```
+
 
 ## What it shows
 
@@ -27,14 +38,23 @@ banner and keeps the GPU panel live, then reconnects automatically.
 
 ## Install
 
+Available on PyPI: **[pypi.org/project/vllmpytop](https://pypi.org/project/vllmpytop/)**.
+
 Requires Python 3.10+ on Linux (curses is stdlib). A working NVIDIA driver is
 needed for the GPU panel.
 
+### install from pypi
+
 ```bash
 pip install vllmpytop
-# or from a checkout:
+```
+
+### install locally
+```bash
+# locally from a checkout:
 pip install .
-# or, for development:
+
+# / for development:
 pip install -e ".[dev]"
 ```
 
@@ -46,12 +66,12 @@ parser). The `/metrics` fetch uses stdlib `urllib`.
 ## Usage
 
 ```bash
-vllmpytop                            # monitor http://localhost:8000
-vllmpytop --url http://host:8000     # a remote vLLM server
-vllmpytop --interval 0.5             # poll twice a second
-vllmpytop --no-gpu                   # skip the GPU panel
-vllmtop                              # 'vllmtop' is an equivalent alias
-python -m vllmpytop                  # same thing, without the entry point
+vllmtop                            # monitor http://localhost:8000
+vllmtop --url http://host:8000     # a remote vLLM server
+vllmtop --interval 0.5             # poll twice a second
+vllmtop --no-gpu                   # skip the GPU panel
+vllmpytop                          # full name as an equivalent alias
+python -m vllmpytop                # same thing, without the entry point
 ```
 
 The server URL can also be set via the `VLLMTOP_URL` environment variable.
