@@ -37,16 +37,34 @@ def _split(start: int, total: int, n: int) -> list[tuple[int, int]]:
 
 
 # The grid below the GPU panel is two columns. `requests` gets a column to
-# itself so it's tall enough for its per-request list; the rest stack opposite.
-GRID_LEFT = ("throughput", "latency", "cache")
+# itself so it's tall enough for its call feed; the rest stack opposite.
+GRID_LEFT = ("throughput", "perf")
 GRID_RIGHT = ("requests",)
 GRID_ORDER = GRID_LEFT + GRID_RIGHT
+
+# Relative heights when panels stack in a column. `perf` is taller because it
+# carries the latency rows *and* the KV-cache chart below them.
+GRID_WEIGHTS = {"throughput": 2, "perf": 3}
+
+
+def _split_weighted(start: int, total: int,
+                    weights: list[int]) -> list[tuple[int, int]]:
+    """Like :func:`_split` but each segment sized proportional to its weight."""
+    tw = sum(weights) or 1
+    out, pos, used = [], start, 0
+    for i, wt in enumerate(weights):
+        seg = (total - used) if i == len(weights) - 1 else (total * wt) // tw
+        out.append((pos, seg))
+        pos += seg
+        used += seg
+    return out
 
 
 def _place_column(panels: Dict[str, "Rect"], names, x: int, w: int,
                   y: int, h: int) -> None:
     """Stack `names` vertically within the column at (x, w), spanning (y, h)."""
-    for name, (ry, rh) in zip(names, _split(y, h, len(names))):
+    weights = [GRID_WEIGHTS.get(n, 1) for n in names]
+    for name, (ry, rh) in zip(names, _split_weighted(y, h, weights)):
         panels[name] = Rect(ry, x, rh, w)
 
 

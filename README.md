@@ -32,17 +32,18 @@ vllmtop                  # or vllmpytop
   precision (`cache_dtype`), requests served, prefix-caching on/off, KV blocks,
   GPU-memory target, and engine awake/sleeping state.
 - **Throughput**: generation tok/s and prompt tok/s (rates derived from vLLM
-  counters), as a mirrored chart — gen (green) grows up from the centre line,
-  prompt/prefill (cyan) grows down — each labelled with its current value.
-- **Requests / Queue**: running vs. waiting request bars, and — when a log
-  source is configured (`--docker <container>` or `--log-file <path>`) — a live
-  feed beneath them of the HTTP calls vLLM serves: age, status, method,
+  counters), as a mirrored chart in btop's network colours — gen (purple) grows
+  up from the centre line, prompt/prefill (pink) grows down — each labelled with
+  its current value.
+- **Requests / Queue**: running, waiting, and KV-cache-usage bars, and — when a
+  log source is configured (`--docker <container>` or `--log-file <path>`) — a
+  live feed beneath them of the HTTP calls vLLM serves: age, status, method,
   endpoint, client, newest first (like btop's process list). This is the
   request *envelope* only — vLLM doesn't log prompt/response text unless started
   with `--enable-log-requests`, so no prompt text is shown.
-- **Latency** (recent average over the last poll interval — far more useful live
-  than the cumulative average): TTFT, inter-token (TPOT), end-to-end, queue time.
-- **Cache**: KV-cache usage % and prefix-cache hit rate.
+- **Perf** (recent average over the last poll interval — far more useful live
+  than the cumulative average): TTFT, inter-token (TPOT), end-to-end, and queue
+  latencies, plus the KV-cache usage chart and prefix-cache hit rate.
 
 Data comes from vLLM's Prometheus `/metrics` endpoint plus in-process NVML
 polling. If vLLM goes away (e.g. a container restart) the UI shows a disconnect
@@ -108,7 +109,7 @@ The server URL can also be set via the `VLLMTOP_URL` environment variable.
 | `q` / `Esc` | quit |
 | `+` / `-` | faster / slower refresh |
 | `p` | pause / resume polling |
-| `1`–`5` | toggle a panel on/off (¹gpu ²throughput ³requests ⁴latency ⁵cache) |
+| `1`–`4` | toggle a panel on/off (¹gpu ²throughput ³requests ⁴perf) |
 | `h` / `?` | toggle help overlay |
 
 Each panel's title carries a superscript number (btop-style) showing the key

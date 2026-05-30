@@ -27,8 +27,7 @@ PANELS = (
     ("gpu", panels.draw_gpu),
     ("throughput", panels.draw_throughput),
     ("requests", panels.draw_requests),
-    ("latency", panels.draw_latency),
-    ("cache", panels.draw_cache),
+    ("perf", panels.draw_perf),
 )
 
 
@@ -159,7 +158,7 @@ class App:
                 self.poller.interval = max(MIN_INTERVAL, self.poller.interval / 2)
             elif ch == ord("-"):
                 self.poller.interval = min(MAX_INTERVAL, self.poller.interval * 2)
-            elif ord("1") <= ch <= ord("5"):
+            elif ord("1") <= ch <= ord("4"):
                 self._toggle_panel(ch - ord("1"))
             elif ch == curses.KEY_RESIZE:
                 self._force_clear = True  # layout recomputed each draw
@@ -221,10 +220,10 @@ class App:
             "  q / Esc    quit",
             "  + / -      faster / slower refresh",
             "  p          pause / resume polling",
-            "  1 - 5      toggle a panel on / off",
+            "  1 - 4      toggle a panel on / off",
             "  h / ?      toggle this help",
             "",
-            "Panels: ¹gpu  ²throughput  ³requests  ⁴latency  ⁵cache",
+            "Panels: ¹gpu  ²throughput  ³requests  ⁴perf",
             "  (gpu shows the model; requests shows the live call feed)",
             "",
             "press any key to close",

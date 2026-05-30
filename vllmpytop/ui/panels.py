@@ -21,6 +21,8 @@ from .theme import (
     PAIR_HI,
     PAIR_INACTIVE,
     PAIR_MAGENTA,
+    PAIR_PINK,
+    PAIR_PURPLE,
     PAIR_RED,
     PAIR_TITLE,
     PAIR_YELLOW,
@@ -340,13 +342,15 @@ def draw_gpu(p: Painter, rect: Rect, snap: Snapshot, hist: History,
 
 
 def _draw_mirror_chart(p: Painter, rect: Rect, top: Sequence[float],
-                       top_pair: int, top_label: str, bottom: Sequence[float],
-                       bottom_pair: int, bottom_label: str) -> None:
+                       top_label: str, bottom: Sequence[float],
+                       bottom_label: str) -> None:
     """A btop-style mirrored chart of two single series sharing a centre line.
 
     ``top`` grows up from the centre, ``bottom`` grows down from it; each half
-    scales to its own max (the series can differ wildly in magnitude). The
-    current value of each is shown as a bold, colour-matched corner label.
+    scales to its own max (the series can differ wildly in magnitude). Each half
+    is coloured like a btop network graph — ``top`` with the download gradient,
+    ``bottom`` with the upload gradient — fading dark at the centre baseline to
+    bright at the peak. The current value of each is a bold white corner label.
     """
     if rect.h <= 0 or rect.w <= 0:
         return
@@ -355,36 +359,87 @@ def _draw_mirror_chart(p: Painter, rect: Rect, top: Sequence[float],
     bot_h = rect.h - top_h
 
     top_vmax = max(max(top, default=0.0), 1e-9)
-    for i, row in enumerate(braille_chart(top, rect.w, top_h, 0.0, top_vmax)):
-        p.text(rect.y + i, rect.x, row, t.attr(top_pair))
+    top_rows = braille_chart(top, rect.w, top_h, 0.0, top_vmax)
+    n = len(top_rows)
+    for i, row in enumerate(top_rows):
+        # Top row (i=0) is the peak; the centre baseline is dimmest.
+        attr = t.net_attr((n - i) / n, up=False) if n else t.attr(0)
+        p.text(rect.y + i, rect.x, row, attr)
 
     if bot_h > 0:
         bot_vmax = max(max(bottom, default=0.0), 1e-9)
         bot_rows = braille_chart(bottom, rect.w, bot_h, 0.0, bot_vmax, flip=True)
+        m = len(bot_rows)
         for i, row in enumerate(bot_rows):
-            p.text(rect.y + top_h + i, rect.x, row, t.attr(bottom_pair))
+            # Grows downward, so the peak is the last (bottom) row.
+            attr = t.net_attr((i + 1) / m, up=True) if m else t.attr(0)
+            p.text(rect.y + top_h + i, rect.x, row, attr)
 
-    p.text(rect.y, rect.x, f" {top_label} ", t.attr(top_pair, bold=True))
+    p.text(rect.y, rect.x, f" {top_label} ", t.attr(PAIR_PURPLE, bold=True))
     if bot_h > 0:
         p.text(rect.y + rect.h - 1, rect.x, f" {bottom_label} ",
-               t.attr(bottom_pair, bold=True))
+               t.attr(PAIR_PINK, bold=True))
+
+
+def _draw_stat_column(p: Painter, y0: int, h: int, rx: int, rw: int,
+                      rows: Sequence[Tuple[str, int, str]]) -> None:
+    """Render a btop mem/disks-style stats column: each row is a white label on
+    the left and a colour-coded value right-aligned within ``rw``. Rows past the
+    available height ``h`` are skipped."""
+    t = p.theme
+    for i, (label, vpair, value) in enumerate(rows):
+        if i >= h:
+            break
+        y = y0 + i
+        p.text(y, rx, label[:rw], t.attr(PAIR_DIM))
+        vs = value[: max(0, rw)]
+        p.text(y, rx + max(0, rw - len(vs)), vs, t.attr(vpair, bold=True))
 
 
 def draw_throughput(p: Painter, rect: Rect, snap: Snapshot, hist: History,
                     num: int = 0) -> None:
+    t = p.theme
     inner = p.box(rect, "throughput", num, title2="tok/s",
                   border_pair=PAIR_BOX_THRU)
     if inner.h <= 0:
         return
-    # Mirrored chart: generation tok/s grows up from the centre line, prompt
-    # (prefill) tok/s grows down from it.
+
+    gen = hist.series["gen_tok_s"].values()
+    prompt = hist.series["prompt_tok_s"].values()
+    gen_now = hist.derived["gen_tok_s"]
+    prompt_now = hist.derived["prompt_tok_s"]
+
+    # btop net-style split: the mirrored gradient chart on the left, a stats
+    # column (white labels) on the right. Generation tok/s grows up from the
+    # centre line, prompt (prefill) tok/s grows down from it.
+    right_w = min(24, max(18, inner.w // 3))
+    chart_w = inner.w - right_w - 1
+    if chart_w < 8:  # too narrow to split; chart takes the whole panel
+        _draw_mirror_chart(
+            p, inner,
+            top=gen, top_label="gen " + big_number(gen_now, " tok/s"),
+            bottom=prompt,
+            bottom_label="prompt " + big_number(prompt_now, " tok/s"),
+        )
+        return
+
     _draw_mirror_chart(
-        p, inner,
-        top=hist.series["gen_tok_s"].values(), top_pair=PAIR_GREEN,
-        top_label="gen " + big_number(hist.derived["gen_tok_s"], " tok/s"),
-        bottom=hist.series["prompt_tok_s"].values(), bottom_pair=PAIR_CYAN,
-        bottom_label="prompt " + big_number(hist.derived["prompt_tok_s"], " tok/s"),
+        p, Rect(inner.y, inner.x, inner.h, chart_w),
+        top=gen, top_label="", bottom=prompt, bottom_label="",
     )
+
+    div_x = inner.x + chart_w
+    for i in range(inner.h):
+        p.text(inner.y + i, div_x, _V, t.attr(PAIR_DIV))
+    rx = div_x + 2
+    rw = inner.w - chart_w - 2
+
+    _draw_stat_column(p, inner.y, inner.h, rx, rw, [
+        ("gen", PAIR_DIM, big_number(gen_now, " tok/s")),
+        ("gen pk", PAIR_DIM, big_number(max(gen, default=0.0), " tok/s")),
+        ("prompt", PAIR_DIM, big_number(prompt_now, " tok/s")),
+        ("prm pk", PAIR_DIM, big_number(max(prompt, default=0.0), " tok/s")),
+    ])
 
 
 def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
@@ -414,9 +469,17 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         p.text(inner.y + 1, inner.x + 9 + bw, f"{v.num_requests_waiting:.0f}",
                t.attr(wpair, bold=True))
 
+    # Third bar: KV-cache usage (a percentage, so a gradient meter + "NN%").
+    if inner.h > 2:
+        kv = hist.derived["kv_cache"]  # already a percent
+        p.text(inner.y + 2, inner.x, "kv cache", t.attr(PAIR_DIM))
+        _draw_meter(p, inner.y + 2, inner.x + 8, bw, kv)
+        p.text(inner.y + 2, inner.x + 9 + bw, f"{kv:3.0f}%",
+               t.grad_attr(kv / 100.0, bold=True))
+
     # Under the bars: a live feed of the HTTP calls vLLM served, parsed from its
     # access log (request envelope only — no prompt/response text). Newest first.
-    list_y = inner.y + 2
+    list_y = inner.y + 3
     if list_y >= inner.y + inner.h:
         return
     p.text(list_y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
@@ -426,27 +489,19 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     )
 
 
-def draw_latency(p: Painter, rect: Rect, snap: Snapshot, hist: History,
-                 num: int = 0) -> None:
+def _draw_perf_stacked(p: Painter, inner: Rect, hist: History,
+                       metrics: Sequence[Tuple[str, str, int]],
+                       kv: float, hit: float) -> None:
+    """Narrow-terminal fallback: latency rows with inline sparklines, then the
+    KV-cache chart below — the pre-split single-column layout."""
     t = p.theme
-    inner = p.box(rect, "latency", num, title2="recent avg",
-                  border_pair=PAIR_BOX_LAT)
-    if inner.h <= 0:
-        return
-    rows = [
-        ("TTFT ", "ttft", PAIR_CYAN),
-        ("TPOT ", "tpot", PAIR_GREEN),
-        ("e2e  ", "e2e", PAIR_MAGENTA),
-        ("queue", "queue_time", PAIR_DIM),
-    ]
-    for i, (label, key, pair) in enumerate(rows):
+    for i, (label, key, pair) in enumerate(metrics):
         if i >= inner.h:
             break
         val = hist.derived[key]
-        p.text(inner.y + i, inner.x, label, t.attr(PAIR_DIM))
+        p.text(inner.y + i, inner.x, f"{label:<5}", t.attr(PAIR_DIM))
         p.text(inner.y + i, inner.x + 6, f"{fmt_seconds(val):>7}",
                t.attr(pair, bold=True))
-        # Sparkline of the series to the right.
         spark_x = inner.x + 14
         spark_w = inner.w - 14
         if spark_w > 2:
@@ -456,34 +511,75 @@ def draw_latency(p: Painter, rect: Rect, snap: Snapshot, hist: History,
             if rowsb:
                 p.text(inner.y + i, spark_x, rowsb[0], t.attr(pair))
 
-
-def draw_cache(p: Painter, rect: Rect, snap: Snapshot, hist: History,
-               num: int = 0) -> None:
-    t = p.theme
-    inner = p.box(rect, "cache", num, border_pair=PAIR_BOX_CACHE)
-    if inner.h <= 0:
+    dy = inner.y + len(metrics)
+    if dy >= inner.y + inner.h:
         return
-    v = snap.vllm
-    kv = hist.derived["kv_cache"]  # already a percent
-    label = "KV   "
-    p.text(inner.y, inner.x, label, t.attr(PAIR_DIM))
-    bw = inner.w - len(label) - 6
-    if bw > 0:
-        _draw_meter(p, inner.y, inner.x + len(label), bw, kv)
-        p.text(inner.y, inner.x + len(label) + bw + 1, f"{kv:3.0f}%",
-               t.grad_attr(kv / 100.0, bold=True))
-
-    if inner.h > 1:
-        hit = v.prefix_cache_hit_rate * 100.0
-        p.text(inner.y + 1, inner.x,
-               f"prefix hit {hit:5.1f}%  "
-               f"({v.prefix_cache_hits_total:.0f}/{v.prefix_cache_queries_total:.0f})",
-               t.attr(PAIR_GREEN if hit > 0 else PAIR_DIM))
-
-    if inner.h > 3:
-        _draw_chart(p, Rect(inner.y + 2, inner.x, inner.h - 2, inner.w),
+    p.text(dy, inner.x, _rule(f"kv {kv:.0f}%  prefix {hit:.0f}%", inner.w),
+           t.attr(PAIR_DIV))
+    chart_y = dy + 1
+    if chart_y < inner.y + inner.h:
+        _draw_chart(p, Rect(chart_y, inner.x, inner.y + inner.h - chart_y,
+                            inner.w),
                     hist.series["kv_cache"].values(), 0.0, 100.0, 0,
                     gradient=True)
+
+
+def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
+              num: int = 0) -> None:
+    """Latency metrics (recent avg) beside the KV-cache usage chart."""
+    t = p.theme
+    inner = p.box(rect, "perf", num, title2="recent avg",
+                  border_pair=PAIR_BOX_LAT)
+    if inner.h <= 0:
+        return
+
+    kv = hist.derived["kv_cache"]
+    hit = snap.vllm.prefix_cache_hit_rate * 100.0
+    metrics = [
+        ("TTFT", "ttft", PAIR_CYAN),
+        ("TPOT", "tpot", PAIR_GREEN),
+        ("e2e", "e2e", PAIR_MAGENTA),
+        ("queue", "queue_time", PAIR_DIM),
+    ]
+
+    # btop mem/disks-style split: ALL the graph lines fill the left side, ALL
+    # the text labels + values sit in a narrow column on the right.
+    right_w = min(18, max(12, inner.w // 4))
+    chart_w = inner.w - right_w - 1
+    if chart_w < 8:  # too narrow to split; fall back to the stacked layout
+        _draw_perf_stacked(p, inner, hist, metrics, kv, hit)
+        return
+
+    div_x = inner.x + chart_w
+    for i in range(inner.h):
+        p.text(inner.y + i, div_x, _V, t.attr(PAIR_DIV))
+    rx = div_x + 2
+    rw = inner.w - chart_w - 2
+
+    # Left: one colour-coded sparkline per latency metric (one row each), then
+    # the kv-cache gradient chart fills whatever height remains.
+    for i, (label, key, pair) in enumerate(metrics):
+        if i >= inner.h:
+            break
+        series = hist.series[key].values()
+        vmax = max(max(series, default=0.0), 1e-6)
+        rowsb = braille_chart(series, chart_w, 1, 0.0, vmax)
+        if rowsb:
+            p.text(inner.y + i, inner.x, rowsb[0], t.attr(pair))
+
+    kv_y = inner.y + len(metrics)
+    if kv_y < inner.y + inner.h:
+        _draw_chart(p, Rect(kv_y, inner.x, inner.y + inner.h - kv_y, chart_w),
+                    hist.series["kv_cache"].values(), 0.0, 100.0, 0,
+                    gradient=True)
+        p.text(kv_y, inner.x, " kv cache ", t.attr(PAIR_DIM, dim=True))
+
+    # Right: all text rows (white), aligned with the lines on the left.
+    rows = [(label, PAIR_DIM, fmt_seconds(hist.derived[key]))
+            for label, key, _ in metrics]
+    rows.append(("kv", PAIR_DIM, f"{kv:.0f}%"))
+    rows.append(("prefix", PAIR_DIM, f"{hit:.0f}%"))
+    _draw_stat_column(p, inner.y, inner.h, rx, rw, rows)
 
 
 def _draw_access_feed(p: Painter, rect: Rect, entries, error=None) -> None:

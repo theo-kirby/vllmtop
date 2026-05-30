@@ -27,21 +27,31 @@ PAIR_BOX_THRU = 12
 PAIR_BOX_REQ = 13
 PAIR_BOX_LAT = 14
 PAIR_BOX_CACHE = 15
+PAIR_PURPLE = 16  # btop net-graph download tint
+PAIR_PINK = 17  # btop net-graph upload tint
 
 # btop's value gradient (green -> yellow -> red) is rendered as a run of color
 # pairs starting here, so graphs/meters can fade smoothly by position/value
 # instead of snapping between three threshold colors.
 GRAD_STEPS = 48
-GRAD_PAIR_BASE = 16  # gradient pairs occupy [16, 16 + GRAD_STEPS)
+GRAD_PAIR_BASE = 18  # cpu gradient pairs occupy [18, 18 + GRAD_STEPS)
+# btop network-tab gradients live just past the cpu gradient. Each fades dark
+# (graph baseline) -> tint -> light (peak), like btop's download/upload graphs.
+GRAD_NET_DOWN_BASE = GRAD_PAIR_BASE + GRAD_STEPS
+GRAD_NET_UP_BASE = GRAD_NET_DOWN_BASE + GRAD_STEPS
+
+_GRAD_CPU_STOPS = ((0x77, 0xCA, 0x9B), (0xCB, 0xC0, 0x6C), (0xDC, 0x4C, 0x4C))
+_NET_DOWN_STOPS = ((0x1E, 0x13, 0x40), (0x9A, 0x5F, 0xEB), (0xCD, 0xB6, 0xFF))
+_NET_UP_STOPS = ((0x3A, 0x0A, 0x2A), (0xFF, 0x5F, 0xB0), (0xFF, 0xC0, 0xE0))
 
 # btop "Default" theme hex values, keyed by the role each pair plays here.
 _PALETTE = {
-    "title": "#ee",        # title
+    "title": "#ffffff",    # title (all text is white)
     "green": "#77ca9b",    # cpu_start  (good / low)
     "yellow": "#cbc06c",   # cpu_mid    (warn)
     "red": "#dc4c4c",      # cpu_end    (crit)
     "cyan": "#74e6fc",     # cached_mid
-    "text": "#cc",         # main_fg
+    "text": "#ffffff",     # main_fg (all text is white)
     "magenta": "#d9626d",  # used_mid
     "hi": "#b54040",       # hi_fg
     "div": "#30",          # div_line
@@ -51,6 +61,8 @@ _PALETTE = {
     "box_req": "#5c588d",  # net_box
     "box_lat": "#805252",  # proc_box
     "box_cache": "#556d59",
+    "purple": "#9a5feb",   # btop net download
+    "pink": "#ff5fb0",     # btop net upload
 }
 
 _PAIR_ROLE = {
@@ -69,6 +81,8 @@ _PAIR_ROLE = {
     PAIR_BOX_REQ: "box_req",
     PAIR_BOX_LAT: "box_lat",
     PAIR_BOX_CACHE: "box_cache",
+    PAIR_PURPLE: "purple",
+    PAIR_PINK: "pink",
 }
 
 # 8-color fallback for terminals without 256 colors.
@@ -88,6 +102,8 @@ _BASIC = {
     "box_req": curses.COLOR_BLUE,
     "box_lat": curses.COLOR_RED,
     "box_cache": curses.COLOR_CYAN,
+    "purple": curses.COLOR_MAGENTA,
+    "pink": curses.COLOR_MAGENTA,
 }
 
 
@@ -96,20 +112,20 @@ def _lerp(a: tuple[int, int, int], b: tuple[int, int, int],
     return tuple(round(a[k] + (b[k] - a[k]) * t) for k in range(3))  # type: ignore[return-value]
 
 
-def _build_gradient(n: int) -> list[tuple[int, int, int]]:
-    """`n` RGB steps fading green->yellow->red, mid color at the midpoint.
+def _build_gradient_stops(
+    n: int, stops: tuple[tuple[int, int, int], ...]
+) -> list[tuple[int, int, int]]:
+    """`n` RGB steps interpolated evenly across `stops` (two or more colors).
 
-    Mirrors btop's cpu gradient (start ``#77ca9b``, mid ``#cbc06c``, end
-    ``#dc4c4c``): the first half interpolates start->mid, the second mid->end.
+    Shared by every btop-style fade: the cpu green->yellow->red value gradient
+    and the network-tab download/upload gradients all build through here.
     """
-    start, mid, end = (0x77, 0xCA, 0x9B), (0xCB, 0xC0, 0x6C), (0xDC, 0x4C, 0x4C)
+    segs = len(stops) - 1
     out: list[tuple[int, int, int]] = []
     for i in range(n):
-        f = i / (n - 1) if n > 1 else 0.0
-        if f <= 0.5:
-            out.append(_lerp(start, mid, f / 0.5))
-        else:
-            out.append(_lerp(mid, end, (f - 0.5) / 0.5))
+        x = (i / (n - 1) if n > 1 else 0.0) * segs
+        k = min(int(x), segs - 1)
+        out.append(_lerp(stops[k], stops[k + 1], x - k))
     return out
 
 
@@ -154,6 +170,8 @@ class Theme:
     def __init__(self) -> None:
         self.has_color = False
         self._grad_pairs: list[int] = []
+        self._net_down_pairs: list[int] = []
+        self._net_up_pairs: list[int] = []
 
     def init(self) -> None:
         if not curses.has_colors():
@@ -194,27 +212,44 @@ class Theme:
             except curses.error:
                 pass
 
-        # btop-style value gradient. Allocate it all-or-nothing so the frac->
-        # index mapping in grad_attr() stays aligned; a basic terminal keeps an
-        # empty list and falls back to the three threshold colors.
-        self._grad_pairs = []
-        grad = _build_gradient(GRAD_STEPS)
-        try:
-            if can_change:
-                base_slot = 16 + len(_PALETTE)
-                for i, (r, g, b) in enumerate(grad):
-                    curses.init_color(base_slot + i, _scale(r), _scale(g),
-                                      _scale(b))
-                    curses.init_pair(GRAD_PAIR_BASE + i, base_slot + i, bg)
-                    self._grad_pairs.append(GRAD_PAIR_BASE + i)
-            elif colors >= 256:
-                for i, (r, g, b) in enumerate(grad):
-                    curses.init_pair(GRAD_PAIR_BASE + i, _to_256(r, g, b), bg)
-                    self._grad_pairs.append(GRAD_PAIR_BASE + i)
-        except curses.error:
-            self._grad_pairs = []
+        # btop-style gradients (cpu value + network download/upload). Each is
+        # allocated all-or-nothing so its frac->index mapping stays aligned; a
+        # basic terminal keeps empty lists and falls back to flat colors.
+        gslot = 16 + len(_PALETTE)
+        self._grad_pairs = self._alloc_gradient(
+            _GRAD_CPU_STOPS, GRAD_PAIR_BASE, gslot, can_change, colors, bg)
+        self._net_down_pairs = self._alloc_gradient(
+            _NET_DOWN_STOPS, GRAD_NET_DOWN_BASE, gslot + GRAD_STEPS,
+            can_change, colors, bg)
+        self._net_up_pairs = self._alloc_gradient(
+            _NET_UP_STOPS, GRAD_NET_UP_BASE, gslot + 2 * GRAD_STEPS,
+            can_change, colors, bg)
 
         self.has_color = True
+
+    def _alloc_gradient(self, stops, pair_base: int, slot_base: int,
+                        can_change: bool, colors: int, bg: int) -> list[int]:
+        """Allocate ``GRAD_STEPS`` consecutive color pairs for one gradient.
+
+        Returns the pair ids, or an empty list if the terminal can't support a
+        smooth gradient (callers then fall back to a flat color).
+        """
+        grad = _build_gradient_stops(GRAD_STEPS, stops)
+        pairs: list[int] = []
+        try:
+            if can_change:
+                for i, (r, g, b) in enumerate(grad):
+                    curses.init_color(slot_base + i, _scale(r), _scale(g),
+                                      _scale(b))
+                    curses.init_pair(pair_base + i, slot_base + i, bg)
+                    pairs.append(pair_base + i)
+            elif colors >= 256:
+                for i, (r, g, b) in enumerate(grad):
+                    curses.init_pair(pair_base + i, _to_256(r, g, b), bg)
+                    pairs.append(pair_base + i)
+        except curses.error:
+            return []
+        return pairs
 
     def attr(self, pair: int, bold: bool = False, dim: bool = False) -> int:
         a = curses.color_pair(pair) if self.has_color else curses.A_NORMAL
@@ -241,6 +276,23 @@ class Theme:
             pair = (PAIR_RED if frac >= 0.85 else
                     PAIR_YELLOW if frac >= 0.5 else PAIR_GREEN)
             a = curses.color_pair(pair)
+        if bold:
+            a |= curses.A_BOLD
+        return a
+
+    def net_attr(self, frac: float, up: bool = False, bold: bool = False) -> int:
+        """Attribute for a point ``frac`` (0..1) along a btop network gradient.
+
+        ``up`` selects the upload gradient (magenta->pink) instead of download
+        (indigo->lavender). Both fade dark->bright with ``frac`` so a graph is
+        dim at its baseline and bright at its peak, like btop's net tab. Falls
+        back to a plain attribute when no smooth gradient could be allocated.
+        """
+        pairs = self._net_up_pairs if up else self._net_down_pairs
+        if not self.has_color or not pairs:
+            return curses.A_BOLD if bold else curses.A_NORMAL
+        idx = max(0, min(len(pairs) - 1, round(frac * (len(pairs) - 1))))
+        a = curses.color_pair(pairs[idx])
         if bold:
             a |= curses.A_BOLD
         return a
