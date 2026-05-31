@@ -36,6 +36,7 @@ from .widgets import (
     fmt_duration,
     fmt_seconds,
     hbar,
+    log_headroom_scale,
     stacked_chart_down,
 )
 
@@ -45,6 +46,13 @@ _H, _V = "─", "│"
 _TITLE_L, _TITLE_R = "┐", "┌"  # frame the title on the top edge
 _TITLE_LD, _TITLE_RD = "┘", "└"  # frame title2 on the bottom edge
 _SUPERSCRIPT = ("⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹")
+
+# Floor for the request-stack axis. Without a full-scale capacity (vLLM doesn't
+# export max_num_seqs as a metric) the chart autoscales to the windowed max — so
+# a steady "1 running" collapses the axis to 1 and fills the whole chart. Anchor
+# the axis here so a low, steady count reads as a low line with room to climb;
+# real bursts past this still autoscale the axis up. Tune to taste.
+_REQ_STACK_FLOOR = 16.0
 
 
 class Painter:
@@ -141,7 +149,13 @@ def _draw_dual_chart(p: Painter, rect: Rect, util: Sequence[float],
     top_h = max(1, rect.h // 2)
     bot_h = rect.h - top_h
 
-    top_rows = braille_chart(util, rect.w, top_h, 0.0, 100.0)
+    # Log-headroom scale: GPU util sits at 0 (idle) or 85-95% (busy), so a
+    # linear axis crushes the busy variation into a thin strip at the top.
+    # Scaling the headroom spreads 85-95% across the upper chart while idle
+    # still reads as a thin floor.
+    top_rows = braille_chart(
+        log_headroom_scale(util, 100.0), rect.w, top_h, 0.0, 1.0
+    )
     n = len(top_rows)
     for i, row in enumerate(top_rows):
         attr = t.grad_attr((n - i) / n) if n else t.attr(0)
@@ -152,7 +166,7 @@ def _draw_dual_chart(p: Painter, rect: Rect, util: Sequence[float],
             (r + w for r, w in zip(running, waiting)), default=0.0
         )
         grid = stacked_chart_down(running, waiting, rect.w, bot_h,
-                                  max(stack_vmax, 1.0))
+                                  max(stack_vmax, _REQ_STACK_FLOOR), log=True)
         band_pair = (PAIR_GREEN, PAIR_MAGENTA)
         for r, cols in enumerate(grid):
             for c, (glyph, band) in enumerate(cols):
@@ -299,7 +313,8 @@ def draw_gpu(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     info_w = min(42, max(28, inner.w * 2 // 5))
     chart_w = inner.w - info_w - 1  # 1 for the vertical divider
     if chart_w < 8:  # too narrow; chart takes the whole panel
-        _draw_chart(p, inner, util_series, 0.0, 100.0, 0, gradient=True)
+        _draw_chart(p, inner, log_headroom_scale(util_series, 100.0),
+                    0.0, 1.0, 0, gradient=True)
         return
 
     # Left: full-height mirrored dual chart.

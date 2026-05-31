@@ -99,12 +99,40 @@ def braille_chart(
     ]
 
 
+def log_headroom_scale(
+    values: Sequence[float], vmax: float = 100.0, k: float = 19.0
+) -> List[float]:
+    """Compress `values` onto a [0, 1] axis that expands the band near `vmax`.
+
+    Plotting near-saturated data (e.g. GPU util that sits at 85-95%) on a linear
+    axis crushes all the variation into a thin strip at the top. This log-scales
+    the *headroom* (``vmax - value``) instead: a value of 0 maps to 0 (a thin
+    floor), ``vmax`` maps to 1 (the top), and the spacing stretches as values
+    approach ``vmax`` so the busy band fills the chart. Larger ``k`` = more
+    stretch near the ceiling. Feed the result to :func:`braille_chart` with
+    ``vmin=0.0, vmax=1.0``.
+    """
+    if vmax <= 0:
+        return [0.0 for _ in values]
+    denom = math.log1p(k)
+    out: List[float] = []
+    for v in values:
+        h = vmax - v
+        if h < 0:
+            h = 0.0
+        elif h > vmax:
+            h = vmax
+        out.append(1.0 - math.log1p(k * h / vmax) / denom)
+    return out
+
+
 def stacked_chart_down(
     near: Sequence[float],
     far: Sequence[float],
     width: int,
     height: int,
     vmax: float,
+    log: bool = False,
 ) -> List[List[tuple]]:
     """Two stacked series growing *downward* from the top row.
 
@@ -115,6 +143,12 @@ def stacked_chart_down(
 
     Because a braille cell packs 2x4 dots but can carry only one colour, a
     cell's band is whichever series owns more of its lit dots (ties -> near).
+
+    With ``log`` the *cumulative* stack is log-scaled (``log1p``): ``near``
+    fills ``log1p(near)`` of the column and the total reaches
+    ``log1p(near + far)``, both normalised by ``log1p(vmax)``. This expands the
+    low end so small integer counts (e.g. 1 vs 2 vs 3 running requests) stay
+    distinct instead of being flattened by an occasional burst.
     """
     grid: List[List[tuple]] = [[(" ", -1)] * width for _ in range(height)]
     if width <= 0 or height <= 0:
@@ -123,6 +157,7 @@ def stacked_chart_down(
     dot_cols = 2 * width
     dot_rows = 4 * height
     span = vmax if vmax > 0 else 1.0
+    log_span = math.log1p(span) if log else 0.0
     near_v, far_v = list(near), list(far)
     near_pad = dot_cols - len(near_v)
     far_pad = dot_cols - len(far_v)
@@ -136,11 +171,22 @@ def stacked_chart_down(
         f_has = 0 <= fi < len(far_v)
         if not (n_has or f_has):
             continue
-        nval = near_v[ni] if n_has else 0.0
-        fval = far_v[fi] if f_has else 0.0
-        n_dots = int(round(min(1.0, max(0.0, nval / span)) * dot_rows))
-        n_dots = max(1, n_dots)  # floor: keep the centre axis continuous
-        f_dots = int(round(min(1.0, max(0.0, fval / span)) * dot_rows))
+        nval = max(0.0, near_v[ni] if n_has else 0.0)
+        fval = max(0.0, far_v[fi] if f_has else 0.0)
+        if log:
+            # Log-scale the cumulative boundaries so the stack stays consistent
+            # (near = log1p(near), total = log1p(near+far)) and the low end is
+            # stretched the most — which is where the near band lives.
+            n_frac = math.log1p(nval) / log_span if log_span else 0.0
+            t_frac = math.log1p(nval + fval) / log_span if log_span else 0.0
+            n_dots = int(round(min(1.0, n_frac) * dot_rows))
+            t_dots = int(round(min(1.0, t_frac) * dot_rows))
+            n_dots = max(1, n_dots)  # floor: keep the centre axis continuous
+            f_dots = max(0, t_dots - n_dots)
+        else:
+            n_dots = int(round(min(1.0, nval / span) * dot_rows))
+            n_dots = max(1, n_dots)  # floor: keep the centre axis continuous
+            f_dots = int(round(min(1.0, fval / span) * dot_rows))
         if n_dots + f_dots > dot_rows:
             f_dots = dot_rows - n_dots
         cell_col, sub_col = gc // 2, gc % 2
