@@ -26,7 +26,7 @@ import time
 from collections import deque
 from typing import Deque, List, Optional, Tuple
 
-from ..state import AccessLogEntry, MergedLogEntry, RequestLogEntry
+from ..state import MergedLogEntry
 
 # client - "METHOD path HTTP/x.y" status   (anywhere in the line, after any
 # logger prefix like "(APIServer pid=1) INFO:  ").
@@ -56,9 +56,25 @@ _OLD_REQUEST_RE = re.compile(
 # to keep the terminal column manageable.
 MAX_PROMPT_DISPLAY = 30
 
-# How recently a request-log line must appear before an access-log line for us
-# to consider them the same request (seconds).
-_CORRELATION_WINDOW = 1.0
+# vLLM request ids are "<prefix>-<hex>", and the prefix identifies the endpoint
+# that produced them. The uvicorn access line carries the real path but no id;
+# the request-log line carries the id but no path — so we recover the endpoint
+# from the prefix to give request-log-driven rows a meaningful endpoint column.
+_ID_PREFIX_ENDPOINT = {
+    "chatcmpl": "/v1/chat/completions",
+    "cmpl": "/v1/completions",
+    "embd": "/v1/embeddings",
+    "pool": "/pooling",
+    "score": "/score",
+    "rerank": "/rerank",
+    "classify": "/classify",
+}
+
+
+def endpoint_for_request_id(request_id: str) -> str:
+    """Best-effort map a vLLM request id to the endpoint that produced it."""
+    prefix = request_id.split("-", 1)[0]
+    return _ID_PREFIX_ENDPOINT.get(prefix, f"/{prefix}" if prefix else "?")
 
 
 def parse_access_line(line: str) -> Optional[Tuple[str, str, str, int]]:
@@ -95,7 +111,7 @@ class AccessLogTailer(threading.Thread):
         self._file = file
         self._docker = docker
         self._merged: Deque[MergedLogEntry] = deque(maxlen=maxlen)
-        self._pending_reqs: Deque[RequestLogEntry] = deque()  # unmerged request entries
+        self._req_logging_seen = False  # True once a request-log line is parsed
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
@@ -123,49 +139,43 @@ class AccessLogTailer(threading.Thread):
     def _ingest(self, line: str) -> None:
         now = time.time()
 
-        # Try access log parse first
+        # A request-log line (--enable-log-requests) is self-describing: it
+        # carries the request id, max_tokens and (vLLM ≥ 0.11.3) the prompt. We
+        # surface it directly as a feed row rather than trying to correlate it
+        # with the access line — the access line has no request id and is logged
+        # at a different point in the request's life, so the two can't be
+        # matched reliably under concurrency.
+        m = _NEW_REQUEST_RE.search(line) or _OLD_REQUEST_RE.search(line)
+        if m:
+            gd = m.groupdict()
+            prompt = gd.get('prompt')  # None for old format (no 'prompt' group)
+            entry = MergedLogEntry(
+                t=now, method="POST",
+                path=endpoint_for_request_id(gd['id']),
+                request_id=gd['id'], max_tokens=int(gd['tok']),
+                prompt=prompt if prompt else None,
+            )
+            with self._lock:
+                self._req_logging_seen = True
+                self._merged.append(entry)
+            return
+
+        # A uvicorn access line carries the client and HTTP status but no prompt.
+        # When request logging is on, every inference request already produces a
+        # request-log row, so the access line is redundant and we skip it. When
+        # request logging is off, access lines are the only per-request signal,
+        # so they become the feed.
         parsed = parse_access_line(line)
         if parsed is not None:
             client, method, path, status = parsed
             if path.split("?", 1)[0] in self.IGNORE_PATHS:
                 return
-            entry = AccessLogEntry(t=now, client=client, method=method,
-                                   path=path, status=status)
-            # Try to merge with a pending request-log entry.
-            req_id = None
-            max_tok = None
-            prompt = None
             with self._lock:
-                # Pop the oldest pending request that falls within the window.
-                while self._pending_reqs:
-                    preq = self._pending_reqs[0]
-                    if now - preq.t <= _CORRELATION_WINDOW:
-                        req_id = preq.request_id
-                        max_tok = preq.max_tokens
-                        prompt = preq.prompt
-                        self._pending_reqs.popleft()
-                        break
-                    else:
-                        self._pending_reqs.popleft()  # expired, discard
-            merged = MergedLogEntry(t=now, client=client, method=method,
-                                    path=path, status=status,
-                                    request_id=req_id, max_tokens=max_tok,
-                                    prompt=prompt if prompt else None)
-            with self._lock:
-                self._merged.append(merged)
-            return
-
-        # Try request log parse (from --enable-log-requests)
-        m = _NEW_REQUEST_RE.search(line) or _OLD_REQUEST_RE.search(line)
-        if m:
-            gd = m.groupdict()
-            preq = RequestLogEntry(
-                t=now, request_id=gd['id'],
-                max_tokens=int(gd['tok']),
-                prompt=gd.get('prompt'),  # None for old format (no 'prompt' group)
-            )
-            with self._lock:
-                self._pending_reqs.append(preq)
+                if self._req_logging_seen:
+                    return
+                self._merged.append(MergedLogEntry(
+                    t=now, client=client, method=method,
+                    path=path, status=status))
 
     def _follow_command(self, cmd: List[str]) -> None:
         try:

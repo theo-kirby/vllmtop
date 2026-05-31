@@ -664,19 +664,21 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
     has_prompt = any(e.prompt is not None for e in entries)
 
     if has_prompt and rect.w >= 58:
-        # Prompt layout: age | code | verb | endpoint | prompt
-        age_w, code_w, meth_w, prompt_w = 4, 4, 5, 16
+        # Prompt layout: age | verb | endpoint | prompt
+        # Request-log-driven rows have no HTTP status (logged at arrival), so
+        # the code column is dropped here in favour of the prompt. Endpoint is
+        # fixed-width (truncated) and the prompt flexes to fill the rest — it's
+        # the most useful column, so it gets the space.
+        age_w, code_w, meth_w, path_w = 4, 0, 5, 20
         x_age = rect.x
-        x_code = x_age + age_w + 1
-        x_meth = x_code + code_w + 1
+        x_code = 0
+        x_meth = x_age + age_w + 1
         x_path = x_meth + meth_w + 1
-        # Endpoint flexes, prompt is fixed width (truncated with …)
-        path_w = max(5, rect.w - (age_w + code_w + meth_w + prompt_w + 3))
         x_prompt = x_path + path_w + 1
+        prompt_w = max(5, rect.x + rect.w - x_prompt)
 
         hdr = t.attr(PAIR_DIM, dim=True)
         p.text(rect.y, x_age, "age", hdr)
-        p.text(rect.y, x_code, "code", hdr)
         p.text(rect.y, x_meth, "verb", hdr)
         p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
         p.text(rect.y, x_prompt, "prompt"[:prompt_w], hdr)
@@ -725,13 +727,18 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
             break
         p.text(y, x_age, fmt_duration(max(0.0, now - e.t)).rjust(age_w)[:age_w],
                t.attr(PAIR_DIM))
-        code_pair = (PAIR_RED if e.status >= 500
-                     else PAIR_YELLOW if e.status >= 400 else PAIR_GREEN)
-        p.text(y, x_code, str(e.status), t.attr(code_pair, bold=True))
+        if code_w:
+            if e.status is None:
+                p.text(y, x_code, "—".rjust(code_w)[:code_w],
+                       t.attr(PAIR_DIM, dim=True))
+            else:
+                code_pair = (PAIR_RED if e.status >= 500
+                             else PAIR_YELLOW if e.status >= 400 else PAIR_GREEN)
+                p.text(y, x_code, str(e.status), t.attr(code_pair, bold=True))
         p.text(y, x_meth, e.method[:meth_w], t.attr(PAIR_DIM))
         p.text(y, x_path, e.path[:path_w], t.attr(PAIR_TITLE))
         if prompt_w:
-            ptext = _truncate_prompt(e.prompt)
+            ptext = _truncate_prompt(e.prompt, prompt_w) if e.prompt else ""
             p.text(y, x_prompt, ptext.ljust(prompt_w)[:prompt_w],
                    t.attr(PAIR_PROMPT) if e.prompt else t.attr(PAIR_DIM, dim=True))
         elif req_w:

@@ -157,26 +157,34 @@ class AccessLogEntry:
 
 @dataclass
 class MergedLogEntry:
-    """Access-log entry optionally enriched with request-log data.
+    """One row in the request feed.
 
-    When vLLM runs with --enable-log-requests, the request ID, max_tokens, and
-    prompt from the corresponding request-log line are merged in (matched by
-    proximity in the log stream). If no request-log line exists, request_id is
-    None. Prompt is available on vLLM ≥ 0.11.3 (PR #29227).
+    Two sources can produce a row:
+
+    * A vLLM request-log line (``--enable-log-requests``) — carries
+      ``request_id``, ``max_tokens`` and ``prompt`` (prompt on vLLM ≥ 0.11.3,
+      PR #29227). The endpoint is inferred from the request-id prefix and
+      ``status`` is ``None`` because it is logged at arrival, before completion.
+    * A uvicorn access line — carries ``client`` and ``status`` but no prompt.
+      Used as a fallback when request logging is off.
+
+    Access lines and request-log lines can't be reliably correlated (the access
+    line has no request id and is emitted at a different time), so each source
+    produces its own rows rather than being merged.
     """
 
     t: float
-    client: str
-    method: str
-    path: str
-    status: int
+    client: str = "—"
+    method: str = "POST"
+    path: str = ""
+    status: Optional[int] = None
     request_id: Optional[str] = None
     max_tokens: Optional[int] = None
     prompt: Optional[str] = None
 
     @property
     def ok(self) -> bool:
-        return 200 <= self.status < 400
+        return self.status is not None and 200 <= self.status < 400
 
 
 @dataclass
