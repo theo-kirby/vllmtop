@@ -42,9 +42,9 @@ GRID_LEFT = ("throughput", "perf")
 GRID_RIGHT = ("requests",)
 GRID_ORDER = GRID_LEFT + GRID_RIGHT
 
-# Relative heights when panels stack in a column. `perf` is taller because it
-# carries the latency rows *and* the KV-cache chart below them.
-GRID_WEIGHTS = {"throughput": 2, "perf": 3}
+# Relative heights when panels stack in a column. `throughput` is taller
+# because it carries both the mirrored chart and the stats column.
+GRID_WEIGHTS = {"throughput": 3, "perf": 2}
 
 
 def _split_weighted(start: int, total: int,
@@ -87,10 +87,10 @@ def compute_layout(lines: int, cols: int, enabled) -> Layout:
 
     panels: Dict[str, Rect] = {}
 
-    # The GPU panel is taller than a single grid cell because its stats column
-    # also carries the compact vLLM model summary.
+    # The gpu slot spans a fraction of the height so the grid panels below
+    # get more room for their charts and feeds.
     if gpu_on and grid:
-        gpu_h = max(9, int(body_h * 0.5))
+        gpu_h = max(8, int(body_h * 0.4))
     elif gpu_on:
         gpu_h = body_h
     else:

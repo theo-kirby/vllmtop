@@ -22,6 +22,7 @@ from .theme import (
     PAIR_INACTIVE,
     PAIR_MAGENTA,
     PAIR_PINK,
+    PAIR_PROMPT,
     PAIR_PURPLE,
     PAIR_RED,
     PAIR_TITLE,
@@ -241,46 +242,67 @@ def _vllm_lines(v: VllmSnapshot) -> List[Tuple[str, int]]:
     return out
 
 
+def _draw_vllm_text_rows(p: Painter, y0: int, h: int, x: int, w: int,
+                         v: VllmSnapshot, theme) -> None:
+    """Render compact vLLM model/engine info rows (full width, no chart).
+
+    Used as a fallback when the GPU side is unavailable, filling the bottom
+    half of the gpu panel with vLLM details alone.
+    """
+    if h <= 0 or w <= 0:
+        return
+    lines = _vllm_lines(v)
+    for i, (text, pair) in enumerate(lines):
+        if i >= h:
+            break
+        p.text(y0 + i, x, text[:w],
+               theme.attr(pair, bold=pair == PAIR_TITLE))
+
+
 def draw_gpu(p: Painter, rect: Rect, snap: Snapshot, hist: History,
              num: int = 0) -> None:
-    """GPU panel with a compact vLLM model summary folded into its stats column.
+    """GPU panel — chart on the left, info column on the right.
 
-    Utilisation chart on the left; the right column carries the live GPU bars
-    and stats, then a divider and a compact view of the served model + engine.
+    The info column is split horizontally: GPU bars on top, vLLM bars on
+    bottom, separated by a ``┄ vllm ┄`` rule (perf-style split).
     """
     t = p.theme
     inner = p.box(rect, "gpu", num, title2="vllm", border_pair=PAIR_BOX_GPU)
     g = snap.gpu
     v = snap.vllm
-    if inner.h <= 0:
+    if inner.h <= 0 or inner.w <= 0:
         return
+
     if not g.available:
-        # No GPU: still surface the vLLM summary so the panel stays useful.
         msg = "GPU unavailable" + (f": {g.error}" if g.error else "")
         p.text(inner.y, inner.x, msg[: inner.w], t.attr(PAIR_DIM, dim=True))
-        y = inner.y + 2
-        for text, pair in _vllm_lines(v):
-            if y >= inner.y + inner.h:
-                break
-            p.text(y, inner.x, text[: inner.w],
-                   t.attr(pair, bold=pair == PAIR_TITLE))
-            y += 1
+        # Still show vLLM info in the info column if there's room.
+        info_w = min(42, max(28, inner.w * 2 // 5))
+        chart_w = inner.w - info_w - 1
+        if info_w >= 16 and v.reachable:
+            ix = inner.x + chart_w + 3
+            iw = inner.w - chart_w - 2
+            # Vertical divider between chart area and info.
+            for i in range(inner.h):
+                p.text(inner.y + i, inner.x + chart_w, _V, t.attr(PAIR_DIV))
+            mid_y = inner.y + inner.h // 2
+            p.text(mid_y - 1, ix, _rule("vllm", iw), t.attr(PAIR_DIV))
+            _draw_vllm_text_rows(p, mid_y, inner.h - mid_y,
+                                  ix, iw, v, t)
         return
 
     util_series = hist.series["gpu_util"].values()
     running_series = hist.series["running"].values()
     waiting_series = hist.series["waiting"].values()
 
-    # The right column is a touch wider now that it also carries the vLLM
-    # summary; the utilisation chart is pushed over to make room.
-    right_w = min(42, max(26, inner.w * 2 // 5))
-    chart_w = inner.w - right_w - 1
-    if chart_w < 8:  # too narrow to split; chart takes the whole panel
+    # Right column width (info), same as the original layout.
+    info_w = min(42, max(28, inner.w * 2 // 5))
+    chart_w = inner.w - info_w - 1  # 1 for the vertical divider
+    if chart_w < 8:  # too narrow; chart takes the whole panel
         _draw_chart(p, inner, util_series, 0.0, 100.0, 0, gradient=True)
         return
 
-    # btop-style mirrored chart: GPU utilisation grows up from the centre line,
-    # the request count (running + waiting) grows down from it.
+    # Left: full-height mirrored dual chart.
     _draw_dual_chart(
         p, Rect(inner.y, inner.x, inner.h, chart_w),
         util=util_series, running=running_series, waiting=waiting_series,
@@ -288,57 +310,87 @@ def draw_gpu(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         wait_now=v.num_requests_waiting,
     )
 
-    # Vertical divider, then the stats column to its right.
+    # Vertical divider between chart and info column.
     div_x = inner.x + chart_w
     for i in range(inner.h):
         p.text(inner.y + i, div_x, _V, t.attr(PAIR_DIV))
     rx = div_x + 2
-    rw = inner.w - chart_w - 2  # content width inside the stats column
+    rw = inner.w - chart_w - 2
+
+    # --- Info column (right side), split horizontally ---
+    # Reserve 2 rows at the top for GPU name + bar, 2 at the bottom for
+    # vLLM, and one row for the divider in between.
+    mid = inner.h // 2  # divider row
 
     def bar_row(y: int, label: str, pct: float) -> None:
         p.text(y, rx, label, t.attr(PAIR_DIM))
-        bw = rw - 10  # 5 for label, 5 for the trailing "  nn%"
+        bw = rw - 10  # 5 for label, 5 for trailing " NN%"
         if bw <= 0:
             return
         bx = rx + 5
         _draw_meter(p, y, bx, bw, pct)
-        p.text(y, bx + bw + 1, f"{pct:3.0f}%", t.grad_attr(pct / 100.0, bold=True))
+        p.text(y, bx + bw + 1, f"{pct:3.0f}%",
+               t.grad_attr(pct / 100.0, bold=True))
 
-    def text_row(y: int, label: str, value: str, pair: int = PAIR_DIM) -> None:
-        p.text(y, rx, label, t.attr(PAIR_DIM))
-        p.text(y, rx + 5, value[: max(0, rw - 5)], t.attr(pair))
+    def text_row(y: int, value: str, pair: int = PAIR_DIM) -> None:
+        p.text(y, rx, value[:rw], t.attr(pair))
 
+    # GPU rows (top half, rows 0 .. mid-1).
     temp_pair = t.threshold(g.temperature, 70, 85)
-    pwr_frac = 100.0 * g.power_usage / g.power_limit if g.power_limit > 0 else 0.0
+    pwr_frac = (100.0 * g.power_usage / g.power_limit
+                if g.power_limit > 0 else 0.0)
 
-    # Each entry draws one row; we render as many as the panel height allows.
-    # GPU stats first, then a divider and the compact vLLM summary.
-    rows = [
-        lambda y: p.text(y, rx, (g.name or "GPU")[:rw],
-                         t.attr(PAIR_TITLE, bold=True)),
+    gpu_rows = [
+        lambda y: text_row(y, g.name or "GPU", PAIR_TITLE),
         lambda y: bar_row(y, "util ", g.util_gpu),
         lambda y: bar_row(y, "vram ", g.mem_used_perc),
         lambda y: bar_row(y, "pwr  ", pwr_frac),
-        lambda y: text_row(y, "temp ",
+        lambda y: text_row(y,
                            f"{g.temperature:.0f}°C  fan {g.fan_speed:.0f}%",
                            temp_pair),
-        lambda y: text_row(y, "core ",
-                           f"{g.power_usage:.0f}/{g.power_limit:.0f}W  "
-                           f"{g.sm_clock:.0f}MHz  "
-                           f"{fmt_bytes(g.mem_used)}/{fmt_bytes(g.mem_total)}"),
-        lambda y: p.text(y, rx, _rule("model", rw), t.attr(PAIR_DIV)),
     ]
-    for text, pair in _vllm_lines(v):
-        rows.append(
-            lambda y, s=text, pr=pair: p.text(
-                y, rx, s[:rw], t.attr(pr, bold=pr == PAIR_TITLE)
-            )
-        )
 
-    for i, draw in enumerate(rows):
-        if i >= inner.h:
+    for i, draw in enumerate(gpu_rows):
+        y = inner.y + i
+        if y >= inner.y + mid:
             break
-        draw(inner.y + i)
+        draw(y)
+
+    # Divider row: ``┄ vllm ┄┄┄`` spanning the info column.
+    p.text(inner.y + mid, rx, _rule("vllm", rw), t.attr(PAIR_DIV))
+
+    # vLLM rows (bottom half, rows mid+1 .. end).
+    model = v.model_name or "unknown model"
+    if v.engine_awake is True:
+        model = "● " + model
+    elif v.engine_awake is False:
+        model = "○ " + model
+
+    running_max = max(max(running_series, default=0.0),
+                      max(waiting_series, default=0.0), 1.0)
+    run_pct = 100.0 * v.num_requests_running / running_max
+    wait_pct = 100.0 * v.num_requests_waiting / running_max
+    kv_pct = v.kv_cache_usage_perc * 100.0
+
+    def draw_wbar(y: int) -> None:
+        p.text(y, rx, "wait ", t.attr(PAIR_DIM))
+        _draw_meter(p, y, rx + 5, max(1, rw - 10), wait_pct)
+        wpair = PAIR_MAGENTA if v.num_requests_waiting > 0 else PAIR_DIM
+        p.text(y, rx + rw - 5, f"{wait_pct:3.0f}%",
+               t.attr(wpair, bold=True))
+
+    vllm_rows = [
+        lambda y: text_row(y, model, PAIR_TITLE),
+        lambda y: bar_row(y, "run  ", run_pct),
+        draw_wbar,
+        lambda y: bar_row(y, "kv   ", kv_pct),
+    ]
+
+    for i, draw in enumerate(vllm_rows):
+        y = inner.y + mid + 1 + i
+        if y >= inner.y + inner.h:
+            break
+        draw(y)
 
 
 def _draw_mirror_chart(p: Painter, rect: Rect, top: Sequence[float],
@@ -449,42 +501,14 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
                   border_pair=PAIR_BOX_REQ)
     if inner.h <= 0:
         return
-    v = snap.vllm
-    running = hist.series["running"].values()
-    waiting = hist.series["waiting"].values()
-    scale = max(max(running, default=0.0), max(waiting, default=0.0), 1.0)
 
-    bw = max(1, inner.w - 18)
-    p.text(inner.y, inner.x, "running ", t.attr(PAIR_DIM))
-    p.text(inner.y, inner.x + 8, hbar(v.num_requests_running, scale, bw),
-           t.attr(PAIR_GREEN))
-    p.text(inner.y, inner.x + 9 + bw, f"{v.num_requests_running:.0f}",
-           t.attr(PAIR_GREEN, bold=True))
-
-    if inner.h > 1:
-        wpair = PAIR_MAGENTA if v.num_requests_waiting > 0 else PAIR_DIM
-        p.text(inner.y + 1, inner.x, "waiting ", t.attr(PAIR_DIM))
-        p.text(inner.y + 1, inner.x + 8, hbar(v.num_requests_waiting, scale, bw),
-               t.attr(wpair))
-        p.text(inner.y + 1, inner.x + 9 + bw, f"{v.num_requests_waiting:.0f}",
-               t.attr(wpair, bold=True))
-
-    # Third bar: KV-cache usage (a percentage, so a gradient meter + "NN%").
-    if inner.h > 2:
-        kv = hist.derived["kv_cache"]  # already a percent
-        p.text(inner.y + 2, inner.x, "kv cache", t.attr(PAIR_DIM))
-        _draw_meter(p, inner.y + 2, inner.x + 8, bw, kv)
-        p.text(inner.y + 2, inner.x + 9 + bw, f"{kv:3.0f}%",
-               t.grad_attr(kv / 100.0, bold=True))
-
-    # Under the bars: merged feed of recent requests.
+    # Running / waiting / kv-cache bars moved to the vllm panel.
+    # This panel now shows only the merged request feed.
     # Shows HTTP method, endpoint, status, and (when --enable-log-requests is
-    # active) the vLLM request ID and max_tokens. Newest first.
-    list_y = inner.y + 3
-    if list_y >= inner.y + inner.h:
-        return
-    p.text(list_y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
-    feed_rect = Rect(list_y + 1, inner.x, inner.y + inner.h - list_y - 1, inner.w)
+    # active) the vLLM prompt text (truncated), request ID, and max_tokens.
+    # Prompt is available on vLLM ≥ 0.11.3. Newest first.
+    p.text(inner.y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
+    feed_rect = Rect(inner.y + 1, inner.x, inner.h - 1, inner.w)
     _draw_merged_feed(p, feed_rect, snap.merged_log, snap.access_error)
 
 
@@ -603,11 +627,22 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     _draw_stat_column(p, inner.y, inner.h, rx, rw, rows)
 
 
+def _truncate_prompt(prompt: str, maxlen: int = 30) -> str:
+    """Truncate a prompt for display, normalizing whitespace and adding … when needed."""
+    if not prompt:
+        return ""
+    # Normalize: collapse newlines and leading/trailing whitespace for terminal display
+    text = " ".join(prompt.split())
+    if len(text) > maxlen:
+        return text[:maxlen - 1] + "…"
+    return text
+
+
 def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
     """Render the merged request feed into ``rect`` — no box.
 
     Each entry carries access-log fields (age, method, endpoint, status)
-    optionally enriched with request-log fields (request_id, max_tokens)
+    optionally enriched with request-log fields (request_id, max_tokens, prompt)
     when vLLM runs with --enable-log-requests. Newest first.
     """
     t = p.theme
@@ -624,10 +659,28 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
 
     now = time.time()
 
-    # Adapt columns based on width and whether request data is available.
+    # Adapt columns based on width and whether request/prompt data is available.
     has_req = any(e.request_id is not None for e in entries)
+    has_prompt = any(e.prompt is not None for e in entries)
 
-    if has_req and rect.w >= 52:
+    if has_prompt and rect.w >= 58:
+        # Prompt layout: age | code | verb | endpoint | prompt
+        age_w, code_w, meth_w, prompt_w = 4, 4, 5, 16
+        x_age = rect.x
+        x_code = x_age + age_w + 1
+        x_meth = x_code + code_w + 1
+        x_path = x_meth + meth_w + 1
+        # Endpoint flexes, prompt is fixed width (truncated with …)
+        path_w = max(5, rect.w - (age_w + code_w + meth_w + prompt_w + 3))
+        x_prompt = x_path + path_w + 1
+
+        hdr = t.attr(PAIR_DIM, dim=True)
+        p.text(rect.y, x_age, "age", hdr)
+        p.text(rect.y, x_code, "code", hdr)
+        p.text(rect.y, x_meth, "verb", hdr)
+        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
+        p.text(rect.y, x_prompt, "prompt"[:prompt_w], hdr)
+    elif has_req and rect.w >= 52:
         # Wide layout: age | code | verb | endpoint | req_id | max_tok
         age_w, code_w, meth_w, req_w, tok_w = 4, 4, 5, 13, 6
         x_age = rect.x
@@ -639,6 +692,8 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
         path_w = max(5, rect.w - (age_w + code_w + meth_w + trailing + 3))
         x_req = x_path + path_w + 1
         x_tok = x_req + req_w + 1
+        prompt_w = 0
+        x_prompt = 0
 
         hdr = t.attr(PAIR_DIM, dim=True)
         p.text(rect.y, x_age, "age", hdr)
@@ -655,8 +710,8 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
         x_meth = x_code + code_w + 1
         x_path = x_meth + meth_w + 1
         path_w = max(4, rect.x + rect.w - x_path)
-        req_w = tok_w = 0
-        x_req = x_tok = 0
+        req_w = tok_w = prompt_w = 0
+        x_req = x_tok = x_prompt = 0
 
         hdr = t.attr(PAIR_DIM, dim=True)
         p.text(rect.y, x_age, "age", hdr)
@@ -675,7 +730,11 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
         p.text(y, x_code, str(e.status), t.attr(code_pair, bold=True))
         p.text(y, x_meth, e.method[:meth_w], t.attr(PAIR_DIM))
         p.text(y, x_path, e.path[:path_w], t.attr(PAIR_TITLE))
-        if req_w:
+        if prompt_w:
+            ptext = _truncate_prompt(e.prompt)
+            p.text(y, x_prompt, ptext.ljust(prompt_w)[:prompt_w],
+                   t.attr(PAIR_PROMPT) if e.prompt else t.attr(PAIR_DIM, dim=True))
+        elif req_w:
             rid = (e.request_id[:12] if e.request_id else "—")
             p.text(y, x_req, rid.ljust(req_w)[:req_w],
                    t.attr(PAIR_CYAN) if e.request_id else t.attr(PAIR_DIM, dim=True))

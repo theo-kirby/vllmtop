@@ -7,8 +7,9 @@ signal available by default is the uvicorn access line, e.g.::
     (APIServer pid=1) INFO:  192.168.32.2:41854 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 
 So this collector parses those lines (client, method, path, status) into a
-rolling :class:`AccessLogEntry` buffer. It is a live feed — no prompt/response
-text, since none is present in the log.
+rolling :class:`AccessLogEntry` buffer. When vLLM ≥ 0.11.3 runs with
+``--enable-log-requests`` the request-log lines also carry the prompt text
+(truncated by vLLM's ``max_log_len``), which we parse and merge in.
 
 The source is either a file (``--log-file``) or the stdout of a streaming
 command such as ``docker logs -f`` (``--docker``). A background thread follows
@@ -31,10 +32,29 @@ from ..state import AccessLogEntry, MergedLogEntry, RequestLogEntry
 # logger prefix like "(APIServer pid=1) INFO:  ").
 _ACCESS_RE = re.compile(r'(\S+) - "([A-Z]+) (\S+) HTTP/[\d.]+" (\d{3})')
 
-# vLLM --enable-log-requests: "Received request <id>: params: SamplingParams(... max_tokens=<n>, ...)"
-_REQUEST_RE = re.compile(
-    r'Received request (\S+?): params: SamplingParams\(.*?max_tokens=(\d+)'
+# vLLM --enable-log-requests log lines.
+# On vLLM ≥ 0.11.3 (PR #29227) the prompt is present at INFO level.
+# vLLM formats with `prompt: %r` which adds quotes: prompt: 'text',
+#   "Received request <id>: prompt: '<text>', params: SamplingParams(... max_tokens=<n>, ...)"
+# On older vLLM the prompt is omitted (only at DEBUG level):
+#   "Received request <id>: params: SamplingParams(... max_tokens=<n>, ...)"
+# Two regexes: try the new format first (with prompt), then the old (without).
+# re.DOTALL is needed because vLLM prompts (especially chat-template'd ones)
+# contain actual newline characters that . wouldn't match otherwise.
+_NEW_REQUEST_RE = re.compile(
+    r"Received request (?P<id>\S+): prompt: '(?P<prompt>.*?)', "
+    r"params: SamplingParams\(.*?max_tokens=(?P<tok>\d+)",
+    re.DOTALL,
 )
+_OLD_REQUEST_RE = re.compile(
+    r"Received request (?P<id>\S+): "
+    r"params: SamplingParams\(.*?max_tokens=(?P<tok>\d+)"
+)
+
+# Max prompt length we display in the feed (truncated with …).
+# vLLM itself truncates at max_log_len (default 1000); we truncate again
+# to keep the terminal column manageable.
+MAX_PROMPT_DISPLAY = 30
 
 # How recently a request-log line must appear before an access-log line for us
 # to consider them the same request (seconds).
@@ -114,6 +134,7 @@ class AccessLogTailer(threading.Thread):
             # Try to merge with a pending request-log entry.
             req_id = None
             max_tok = None
+            prompt = None
             with self._lock:
                 # Pop the oldest pending request that falls within the window.
                 while self._pending_reqs:
@@ -121,23 +142,28 @@ class AccessLogTailer(threading.Thread):
                     if now - preq.t <= _CORRELATION_WINDOW:
                         req_id = preq.request_id
                         max_tok = preq.max_tokens
+                        prompt = preq.prompt
                         self._pending_reqs.popleft()
                         break
                     else:
                         self._pending_reqs.popleft()  # expired, discard
             merged = MergedLogEntry(t=now, client=client, method=method,
                                     path=path, status=status,
-                                    request_id=req_id, max_tokens=max_tok)
+                                    request_id=req_id, max_tokens=max_tok,
+                                    prompt=prompt if prompt else None)
             with self._lock:
                 self._merged.append(merged)
             return
 
         # Try request log parse (from --enable-log-requests)
-        m = _REQUEST_RE.search(line)
+        m = _NEW_REQUEST_RE.search(line) or _OLD_REQUEST_RE.search(line)
         if m:
-            request_id, max_tokens = m.groups()
-            preq = RequestLogEntry(t=now, request_id=request_id,
-                                   max_tokens=int(max_tokens))
+            gd = m.groupdict()
+            preq = RequestLogEntry(
+                t=now, request_id=gd['id'],
+                max_tokens=int(gd['tok']),
+                prompt=gd.get('prompt'),  # None for old format (no 'prompt' group)
+            )
             with self._lock:
                 self._pending_reqs.append(preq)
 
@@ -186,8 +212,9 @@ class AccessLogTailer(threading.Thread):
         """Return merged entries, newest first (at most ``n``).
 
         Each entry carries access-log fields (method, path, status, client)
-        optionally enriched with request-log fields (request_id, max_tokens)
-        when vLLM runs with --enable-log-requests.
+        optionally enriched with request-log fields (request_id, max_tokens, prompt)
+        when vLLM runs with --enable-log-requests. Prompt text is available on
+        vLLM ≥ 0.11.3 (PR #29227).
         """
         with self._lock:
             items = list(self._merged)

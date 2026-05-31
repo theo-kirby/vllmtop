@@ -29,12 +29,13 @@ PAIR_BOX_LAT = 14
 PAIR_BOX_CACHE = 15
 PAIR_PURPLE = 16  # btop net-graph download tint
 PAIR_PINK = 17  # btop net-graph upload tint
+PAIR_PROMPT = 18  # request prompt text in the feed
 
 # btop's value gradient (green -> yellow -> red) is rendered as a run of color
 # pairs starting here, so graphs/meters can fade smoothly by position/value
 # instead of snapping between three threshold colors.
 GRAD_STEPS = 48
-GRAD_PAIR_BASE = 18  # cpu gradient pairs occupy [18, 18 + GRAD_STEPS)
+GRAD_PAIR_BASE = 19  # cpu gradient pairs occupy [19, 19 + GRAD_STEPS)
 # btop network-tab gradients live just past the cpu gradient. Each fades dark
 # (graph baseline) -> tint -> light (peak), like btop's download/upload graphs.
 GRAD_NET_DOWN_BASE = GRAD_PAIR_BASE + GRAD_STEPS
@@ -63,6 +64,7 @@ _PALETTE = {
     "box_cache": "#556d59",
     "purple": "#9a5feb",   # btop net download
     "pink": "#ff5fb0",     # btop net upload
+    "prompt": "#e8a76a",   # warm amber for prompt text
 }
 
 _PAIR_ROLE = {
@@ -83,6 +85,7 @@ _PAIR_ROLE = {
     PAIR_BOX_CACHE: "box_cache",
     PAIR_PURPLE: "purple",
     PAIR_PINK: "pink",
+    PAIR_PROMPT: "prompt",
 }
 
 # 8-color fallback for terminals without 256 colors.
@@ -104,6 +107,7 @@ _BASIC = {
     "box_cache": curses.COLOR_CYAN,
     "purple": curses.COLOR_MAGENTA,
     "pink": curses.COLOR_MAGENTA,
+    "prompt": curses.COLOR_YELLOW,
 }
 
 

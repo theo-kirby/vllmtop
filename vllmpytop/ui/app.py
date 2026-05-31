@@ -224,7 +224,7 @@ class App:
             "  h / ?      toggle this help",
             "",
             "Panels: ¹gpu  ²throughput  ³requests  ⁴perf",
-            "  (gpu shows the model; requests shows the live call feed)",
+            "  (gpu shows model + engine info; requests shows the call feed)",
             "",
             "press any key to close",
         ]

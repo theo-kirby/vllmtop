@@ -122,11 +122,17 @@ class GpuSnapshot:
 
 @dataclass
 class RequestLogEntry:
-    """One parsed vLLM request-log line (from --enable-log-requests)."""
+    """One parsed vLLM request-log line (from --enable-log-requests).
+
+    The ``prompt`` field is populated on vLLM ≥ 0.11.3 (PR #29227 fixed a
+    regression where it was only logged at DEBUG level). For older versions
+    it will be ``None``.
+    """
 
     t: float  # wall-clock time we read the line
     request_id: str  # e.g. "chatcmpl-8e11840cfdc1ffc2"
     max_tokens: int  # max generation length requested
+    prompt: Optional[str] = None  # input prompt text (truncated by vLLM)
 
 
 @dataclass
@@ -153,9 +159,10 @@ class AccessLogEntry:
 class MergedLogEntry:
     """Access-log entry optionally enriched with request-log data.
 
-    When vLLM runs with --enable-log-requests, the request ID and max_tokens
-    from the corresponding request-log line are merged in (matched by proximity
-    in the log stream). If no request-log line exists, request_id is None.
+    When vLLM runs with --enable-log-requests, the request ID, max_tokens, and
+    prompt from the corresponding request-log line are merged in (matched by
+    proximity in the log stream). If no request-log line exists, request_id is
+    None. Prompt is available on vLLM ≥ 0.11.3 (PR #29227).
     """
 
     t: float
@@ -165,6 +172,11 @@ class MergedLogEntry:
     status: int
     request_id: Optional[str] = None
     max_tokens: Optional[int] = None
+    prompt: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status < 400
 
 
 @dataclass
