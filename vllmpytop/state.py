@@ -121,6 +121,15 @@ class GpuSnapshot:
 
 
 @dataclass
+class RequestLogEntry:
+    """One parsed vLLM request-log line (from --enable-log-requests)."""
+
+    t: float  # wall-clock time we read the line
+    request_id: str  # e.g. "chatcmpl-8e11840cfdc1ffc2"
+    max_tokens: int  # max generation length requested
+
+
+@dataclass
 class AccessLogEntry:
     """One parsed uvicorn access-log line (an HTTP call vLLM served).
 
@@ -141,13 +150,31 @@ class AccessLogEntry:
 
 
 @dataclass
+class MergedLogEntry:
+    """Access-log entry optionally enriched with request-log data.
+
+    When vLLM runs with --enable-log-requests, the request ID and max_tokens
+    from the corresponding request-log line are merged in (matched by proximity
+    in the log stream). If no request-log line exists, request_id is None.
+    """
+
+    t: float
+    client: str
+    method: str
+    path: str
+    status: int
+    request_id: Optional[str] = None
+    max_tokens: Optional[int] = None
+
+
+@dataclass
 class Snapshot:
     """A combined vLLM + GPU sample taken at one monotonic instant."""
 
     monotonic: float
     vllm: VllmSnapshot
     gpu: GpuSnapshot
-    access_log: List[AccessLogEntry] = field(default_factory=list)
+    merged_log: List[MergedLogEntry] = field(default_factory=list)
     access_error: Optional[str] = None
 
 

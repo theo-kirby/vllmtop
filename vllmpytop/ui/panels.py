@@ -6,7 +6,7 @@ import curses
 import time
 from typing import List, Sequence, Tuple
 
-from ..state import History, Snapshot, VllmSnapshot
+from ..state import History, MergedLogEntry, Snapshot, VllmSnapshot
 from .layout import Rect
 from .theme import (
     PAIR_BOX_CACHE,
@@ -477,16 +477,15 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         p.text(inner.y + 2, inner.x + 9 + bw, f"{kv:3.0f}%",
                t.grad_attr(kv / 100.0, bold=True))
 
-    # Under the bars: a live feed of the HTTP calls vLLM served, parsed from its
-    # access log (request envelope only — no prompt/response text). Newest first.
+    # Under the bars: merged feed of recent requests.
+    # Shows HTTP method, endpoint, status, and (when --enable-log-requests is
+    # active) the vLLM request ID and max_tokens. Newest first.
     list_y = inner.y + 3
     if list_y >= inner.y + inner.h:
         return
     p.text(list_y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
-    _draw_access_feed(
-        p, Rect(list_y + 1, inner.x, inner.y + inner.h - list_y - 1, inner.w),
-        snap.access_log, snap.access_error,
-    )
+    feed_rect = Rect(list_y + 1, inner.x, inner.y + inner.h - list_y - 1, inner.w)
+    _draw_merged_feed(p, feed_rect, snap.merged_log, snap.access_error)
 
 
 def _draw_perf_stacked(p: Painter, inner: Rect, hist: History,
@@ -533,8 +532,6 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     if inner.h <= 0:
         return
 
-    kv = hist.derived["kv_cache"]
-    hit = snap.vllm.prefix_cache_hit_rate * 100.0
     metrics = [
         ("TTFT", "ttft", PAIR_CYAN),
         ("TPOT", "tpot", PAIR_GREEN),
@@ -547,7 +544,9 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     right_w = min(18, max(12, inner.w // 4))
     chart_w = inner.w - right_w - 1
     if chart_w < 8:  # too narrow to split; fall back to the stacked layout
-        _draw_perf_stacked(p, inner, hist, metrics, kv, hit)
+        _draw_perf_stacked(p, inner, hist, metrics,
+                           hist.derived["kv_cache"],
+                           snap.vllm.prefix_cache_hit_rate * 100.0)
         return
 
     div_x = inner.x + chart_w
@@ -567,27 +566,49 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         if rowsb:
             p.text(inner.y + i, inner.x, rowsb[0], t.attr(pair))
 
-    kv_y = inner.y + len(metrics)
-    if kv_y < inner.y + inner.h:
-        _draw_chart(p, Rect(kv_y, inner.x, inner.y + inner.h - kv_y, chart_w),
-                    hist.series["kv_cache"].values(), 0.0, 100.0, 0,
-                    gradient=True)
-        p.text(kv_y, inner.x, " kv cache ", t.attr(PAIR_DIM, dim=True))
+    # Per-request section: separator after latency metrics, then sparklines.
+    pr_y = inner.y + len(metrics) + 1  # separator row after latency sparklines
+    has_pr = pr_y < inner.y + inner.h
 
-    # Right: all text rows (white), aligned with the lines on the left.
+    if has_pr:
+        p.text(pr_y, inner.x, _rule("per-request", chart_w), t.attr(PAIR_DIV))
+
+    pr_metrics = [
+        ("p-tok", "req_prompt_tok", PAIR_CYAN),
+        ("g-tok", "req_gen_tok", PAIR_GREEN),
+        ("prefill", "req_prefill", PAIR_YELLOW),
+        ("decode", "req_decode", PAIR_PURPLE),
+    ]
+    pr_text_rows = []
+    pr_start = pr_y + 1 if has_pr else inner.y + inner.h  # no-op if no room
+    for i, (label, key, pair) in enumerate(pr_metrics):
+        row_y = pr_start + i
+        if row_y >= inner.y + inner.h:
+            break
+        series = hist.series[key].values()
+        vmax = max(max(series, default=0.0), 1e-6)
+        rowsb = braille_chart(series, chart_w, 1, 0.0, vmax)
+        if rowsb:
+            p.text(row_y, inner.x, rowsb[0], t.attr(pair))
+        val = hist.derived[key]
+        if "tok" in key:
+            pr_text_rows.append((label, PAIR_DIM, f"{val:.0f}"))
+        else:
+            pr_text_rows.append((label, PAIR_DIM, fmt_seconds(val)))
+
+    # Right: all text rows, aligned with the lines on the left.
     rows = [(label, PAIR_DIM, fmt_seconds(hist.derived[key]))
             for label, key, _ in metrics]
-    rows.append(("kv", PAIR_DIM, f"{kv:.0f}%"))
-    rows.append(("prefix", PAIR_DIM, f"{hit:.0f}%"))
+    rows.extend(pr_text_rows)
     _draw_stat_column(p, inner.y, inner.h, rx, rw, rows)
 
 
-def _draw_access_feed(p: Painter, rect: Rect, entries, error=None) -> None:
-    """Render the access-log feed (header + rows) into ``rect`` — no box.
+def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
+    """Render the merged request feed into ``rect`` — no box.
 
-    Shown beneath the requests panel's bars. The request envelope only — age,
-    status, method, endpoint, client (vLLM doesn't log prompt/response text
-    unless started with ``--enable-log-requests``). Newest first.
+    Each entry carries access-log fields (age, method, endpoint, status)
+    optionally enriched with request-log fields (request_id, max_tokens)
+    when vLLM runs with --enable-log-requests. Newest first.
     """
     t = p.theme
     if rect.h <= 0 or rect.w <= 0:
@@ -597,29 +618,52 @@ def _draw_access_feed(p: Painter, rect: Rect, entries, error=None) -> None:
                t.attr(PAIR_YELLOW, dim=True))
         return
     if not entries:
-        hint = "no recent calls — pass --docker <name> or --log-file <path>"
+        hint = "pass --docker <name> or --log-file <path> to show recent calls"
         p.text(rect.y, rect.x, hint[: rect.w], t.attr(PAIR_DIM, dim=True))
         return
 
-    # Columns: age | code | verb | endpoint (flex) | client (right-aligned).
-    age_w, code_w, meth_w = 4, 4, 5
-    client_w = 21 if rect.w >= 62 else 0
-    x_age = rect.x
-    x_code = x_age + age_w + 1
-    x_meth = x_code + code_w + 1
-    x_path = x_meth + meth_w + 1
-    x_client = rect.x + rect.w - client_w
-    path_w = max(6, (x_client - 1 if client_w else rect.x + rect.w) - x_path)
-
-    hdr = t.attr(PAIR_DIM, dim=True)
-    p.text(rect.y, x_age, "age", hdr)
-    p.text(rect.y, x_code, "code", hdr)
-    p.text(rect.y, x_meth, "verb", hdr)
-    p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
-    if client_w:
-        p.text(rect.y, x_client, "client", hdr)
-
     now = time.time()
+
+    # Adapt columns based on width and whether request data is available.
+    has_req = any(e.request_id is not None for e in entries)
+
+    if has_req and rect.w >= 52:
+        # Wide layout: age | code | verb | endpoint | req_id | max_tok
+        age_w, code_w, meth_w, req_w, tok_w = 4, 4, 5, 13, 6
+        x_age = rect.x
+        x_code = x_age + age_w + 1
+        x_meth = x_code + code_w + 1
+        x_path = x_meth + meth_w + 1
+        # Path takes remaining space after fixed cols, minus space for req_id+max_tok
+        trailing = req_w + tok_w + 2  # 2 dividers
+        path_w = max(5, rect.w - (age_w + code_w + meth_w + trailing + 3))
+        x_req = x_path + path_w + 1
+        x_tok = x_req + req_w + 1
+
+        hdr = t.attr(PAIR_DIM, dim=True)
+        p.text(rect.y, x_age, "age", hdr)
+        p.text(rect.y, x_code, "code", hdr)
+        p.text(rect.y, x_meth, "verb", hdr)
+        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
+        p.text(rect.y, x_req, "req id"[:req_w], hdr)
+        p.text(rect.y, x_tok, "max_tok"[:tok_w], hdr)
+    else:
+        # Narrow layout: age | code | verb | endpoint (flex)
+        age_w, code_w, meth_w = 4, 4, 5
+        x_age = rect.x
+        x_code = x_age + age_w + 1
+        x_meth = x_code + code_w + 1
+        x_path = x_meth + meth_w + 1
+        path_w = max(4, rect.x + rect.w - x_path)
+        req_w = tok_w = 0
+        x_req = x_tok = 0
+
+        hdr = t.attr(PAIR_DIM, dim=True)
+        p.text(rect.y, x_age, "age", hdr)
+        p.text(rect.y, x_code, "code", hdr)
+        p.text(rect.y, x_meth, "verb", hdr)
+        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
+
     for i, e in enumerate(entries):
         y = rect.y + 1 + i
         if y >= rect.y + rect.h:
@@ -631,5 +675,11 @@ def _draw_access_feed(p: Painter, rect: Rect, entries, error=None) -> None:
         p.text(y, x_code, str(e.status), t.attr(code_pair, bold=True))
         p.text(y, x_meth, e.method[:meth_w], t.attr(PAIR_DIM))
         p.text(y, x_path, e.path[:path_w], t.attr(PAIR_TITLE))
-        if client_w:
-            p.text(y, x_client, e.client[:client_w], t.attr(PAIR_DIM, dim=True))
+        if req_w:
+            rid = (e.request_id[:12] if e.request_id else "—")
+            p.text(y, x_req, rid.ljust(req_w)[:req_w],
+                   t.attr(PAIR_CYAN) if e.request_id else t.attr(PAIR_DIM, dim=True))
+            tok_val = f"{e.max_tokens:>5}" if e.max_tokens is not None else "     -"
+            p.text(y, x_tok, tok_val[:tok_w],
+                   t.attr(PAIR_CYAN, bold=True) if e.max_tokens is not None
+                   else t.attr(PAIR_DIM, dim=True))

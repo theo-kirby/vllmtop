@@ -45,8 +45,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "(env VLLMTOP_LOG_FILE)",
     )
     p.add_argument(
-        "--docker", metavar="CONTAINER", default=None,
-        help="stream `docker logs -f` from this container for the activity panel",
+        "--docker", metavar="CONTAINER", default=os.environ.get("VLLMTOP_DOCKER"),
+        help="stream `docker logs -f` from this container for the activity panel "
+             "(env VLLMTOP_DOCKER)",
     )
     p.add_argument(
         "--dump-json", action="store_true",

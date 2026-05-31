@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0"]
+dev = ["pytest>=8.0", "build>=1.0", "twine>=5.0", "watchfiles>=1.0"]
 
 [project.urls]
 Homepage = "https://github.com/theo-kirby/vllmtop"

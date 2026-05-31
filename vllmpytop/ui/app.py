@@ -11,7 +11,7 @@ from ..collectors.access_log import AccessLogTailer
 from ..collectors.gpu import GpuCollector
 from ..collectors.vllm import VllmCollector
 from ..config import AppConfig
-from ..state import GpuSnapshot, History, Snapshot, VllmSnapshot
+from ..state import GpuSnapshot, History, MergedLogEntry, Snapshot, VllmSnapshot
 from . import panels
 from .layout import compute_layout
 from .panels import Painter
@@ -51,10 +51,10 @@ class Poller(threading.Thread):
         gsnap = self.gpu.poll() if self.gpu is not None else GpuSnapshot(
             available=False
         )
-        access = self.tailer.snapshot() if self.tailer is not None else []
+        merged = self.tailer.merged_log() if self.tailer is not None else []
         err = self.tailer.error if self.tailer is not None else None
         return Snapshot(monotonic=time.monotonic(), vllm=self.vllm.poll(),
-                        gpu=gsnap, access_log=access, access_error=err)
+                        gpu=gsnap, merged_log=merged, access_error=err)
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -195,7 +195,7 @@ class App:
             return
 
         snap = self.last or Snapshot(time.monotonic(), VllmSnapshot(),
-                                     GpuSnapshot())
+                                     GpuSnapshot(), merged_log=[])
         for i, (name, fn) in enumerate(PANELS):
             rect = layout.panels.get(name)
             if rect is not None:

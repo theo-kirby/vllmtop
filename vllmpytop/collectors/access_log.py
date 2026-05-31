@@ -25,11 +25,20 @@ import time
 from collections import deque
 from typing import Deque, List, Optional, Tuple
 
-from ..state import AccessLogEntry
+from ..state import AccessLogEntry, MergedLogEntry, RequestLogEntry
 
 # client - "METHOD path HTTP/x.y" status   (anywhere in the line, after any
 # logger prefix like "(APIServer pid=1) INFO:  ").
 _ACCESS_RE = re.compile(r'(\S+) - "([A-Z]+) (\S+) HTTP/[\d.]+" (\d{3})')
+
+# vLLM --enable-log-requests: "Received request <id>: params: SamplingParams(... max_tokens=<n>, ...)"
+_REQUEST_RE = re.compile(
+    r'Received request (\S+?): params: SamplingParams\(.*?max_tokens=(\d+)'
+)
+
+# How recently a request-log line must appear before an access-log line for us
+# to consider them the same request (seconds).
+_CORRELATION_WINDOW = 1.0
 
 
 def parse_access_line(line: str) -> Optional[Tuple[str, str, str, int]]:
@@ -65,7 +74,8 @@ class AccessLogTailer(threading.Thread):
         super().__init__(daemon=True)
         self._file = file
         self._docker = docker
-        self._buf: Deque[AccessLogEntry] = deque(maxlen=maxlen)
+        self._merged: Deque[MergedLogEntry] = deque(maxlen=maxlen)
+        self._pending_reqs: Deque[RequestLogEntry] = deque()  # unmerged request entries
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
@@ -91,16 +101,45 @@ class AccessLogTailer(threading.Thread):
             self.error = str(exc)
 
     def _ingest(self, line: str) -> None:
+        now = time.time()
+
+        # Try access log parse first
         parsed = parse_access_line(line)
-        if parsed is None:
+        if parsed is not None:
+            client, method, path, status = parsed
+            if path.split("?", 1)[0] in self.IGNORE_PATHS:
+                return
+            entry = AccessLogEntry(t=now, client=client, method=method,
+                                   path=path, status=status)
+            # Try to merge with a pending request-log entry.
+            req_id = None
+            max_tok = None
+            with self._lock:
+                # Pop the oldest pending request that falls within the window.
+                while self._pending_reqs:
+                    preq = self._pending_reqs[0]
+                    if now - preq.t <= _CORRELATION_WINDOW:
+                        req_id = preq.request_id
+                        max_tok = preq.max_tokens
+                        self._pending_reqs.popleft()
+                        break
+                    else:
+                        self._pending_reqs.popleft()  # expired, discard
+            merged = MergedLogEntry(t=now, client=client, method=method,
+                                    path=path, status=status,
+                                    request_id=req_id, max_tokens=max_tok)
+            with self._lock:
+                self._merged.append(merged)
             return
-        client, method, path, status = parsed
-        if path.split("?", 1)[0] in self.IGNORE_PATHS:
-            return
-        entry = AccessLogEntry(t=time.time(), client=client, method=method,
-                               path=path, status=status)
-        with self._lock:
-            self._buf.append(entry)
+
+        # Try request log parse (from --enable-log-requests)
+        m = _REQUEST_RE.search(line)
+        if m:
+            request_id, max_tokens = m.groups()
+            preq = RequestLogEntry(t=now, request_id=request_id,
+                                   max_tokens=int(max_tokens))
+            with self._lock:
+                self._pending_reqs.append(preq)
 
     def _follow_command(self, cmd: List[str]) -> None:
         try:
@@ -143,10 +182,15 @@ class AccessLogTailer(threading.Thread):
                     except OSError:
                         break
 
-    def snapshot(self, n: Optional[int] = None) -> List[AccessLogEntry]:
-        """Return recent entries, newest first (at most ``n``)."""
+    def merged_log(self, n: Optional[int] = None) -> List[MergedLogEntry]:
+        """Return merged entries, newest first (at most ``n``).
+
+        Each entry carries access-log fields (method, path, status, client)
+        optionally enriched with request-log fields (request_id, max_tokens)
+        when vLLM runs with --enable-log-requests.
+        """
         with self._lock:
-            items = list(self._buf)
+            items = list(self._merged)
         items.reverse()
         return items if n is None else items[:n]
 

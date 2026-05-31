@@ -51,7 +51,7 @@ _PALETTE = {
     "yellow": "#cbc06c",   # cpu_mid    (warn)
     "red": "#dc4c4c",      # cpu_end    (crit)
     "cyan": "#74e6fc",     # cached_mid
-    "text": "#ffffff",     # main_fg (all text is white)
+    "text": "#aaaaaa",       # main_fg (grey labels, dimmer than white)
     "magenta": "#d9626d",  # used_mid
     "hi": "#b54040",       # hi_fg
     "div": "#30",          # div_line
