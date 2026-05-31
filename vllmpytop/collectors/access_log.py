@@ -1,19 +1,20 @@
-"""Tail the vLLM server's uvicorn access log into a feed of HTTP calls.
+"""Tail the vLLM server's log into a feed of inference requests.
 
 vLLM's ``/metrics`` is aggregate-only and its request prompts are not logged
-unless the server runs with ``--enable-log-requests``. The one per-request
-signal available by default is the uvicorn access line, e.g.::
+unless the server runs with ``--enable-log-requests``. With that flag vLLM
+emits a request-log line per inference call, e.g.::
 
-    (APIServer pid=1) INFO:  192.168.32.2:41854 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+    Received request chatcmpl-abc: prompt: 'Hello', params: SamplingParams(... max_tokens=100 ...)
 
-So this collector parses those lines (client, method, path, status) into a
-rolling :class:`AccessLogEntry` buffer. When vLLM ≥ 0.11.3 runs with
-``--enable-log-requests`` the request-log lines also carry the prompt text
-(truncated by vLLM's ``max_log_len``), which we parse and merge in.
+So this collector parses those lines (request id, max_tokens and, on vLLM ≥
+0.11.3 via PR #29227, the prompt text truncated by ``max_log_len``) into a
+rolling :class:`MergedLogEntry` buffer. Uvicorn access lines (the HTTP
+envelope and status) are ignored — only the actual inference requests are
+shown.
 
 The source is either a file (``--log-file``) or the stdout of a streaming
 command such as ``docker logs -f`` (``--docker``). A background thread follows
-it; the UI reads :meth:`AccessLogTailer.snapshot` each frame.
+it; the UI reads :meth:`AccessLogTailer.merged_log` each frame.
 """
 
 from __future__ import annotations
@@ -24,13 +25,9 @@ import subprocess
 import threading
 import time
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, List, Optional
 
 from ..state import MergedLogEntry
-
-# client - "METHOD path HTTP/x.y" status   (anywhere in the line, after any
-# logger prefix like "(APIServer pid=1) INFO:  ").
-_ACCESS_RE = re.compile(r'(\S+) - "([A-Z]+) (\S+) HTTP/[\d.]+" (\d{3})')
 
 # vLLM --enable-log-requests log lines.
 # On vLLM ≥ 0.11.3 (PR #29227) the prompt is present at INFO level.
@@ -77,33 +74,14 @@ def endpoint_for_request_id(request_id: str) -> str:
     return _ID_PREFIX_ENDPOINT.get(prefix, f"/{prefix}" if prefix else "?")
 
 
-def parse_access_line(line: str) -> Optional[Tuple[str, str, str, int]]:
-    """Parse a uvicorn access line into ``(client, method, path, status)``.
-
-    Returns None for any line that is not an access log entry. Pure function so
-    it can be unit-tested against sample log lines.
-    """
-    m = _ACCESS_RE.search(line)
-    if not m:
-        return None
-    client, method, path, status = m.groups()
-    try:
-        return client, method, path, int(status)
-    except ValueError:
-        return None
-
-
 class AccessLogTailer(threading.Thread):
-    """Follows a log source and parses access lines into a rolling buffer.
+    """Follows a log source and parses vLLM request-log lines into a buffer.
 
-    Starts at the *end* of the source (like ``tail -f``) so only calls observed
-    while running are shown — that keeps each entry's age meaningful. Any
-    failure (missing file, no ``docker``, container gone) is surfaced via
+    Starts at the *end* of the source (like ``tail -f``) so only requests
+    observed while running are shown — that keeps each entry's age meaningful.
+    Any failure (missing file, no ``docker``, container gone) is surfaced via
     :attr:`error` rather than crashing the UI.
     """
-
-    # Infra endpoints we never surface (vllmtop's own polling, health checks).
-    IGNORE_PATHS = frozenset({"/metrics", "/health", "/ping", "/version"})
 
     def __init__(self, *, file: Optional[str] = None,
                  docker: Optional[str] = None, maxlen: int = 200) -> None:
@@ -111,7 +89,6 @@ class AccessLogTailer(threading.Thread):
         self._file = file
         self._docker = docker
         self._merged: Deque[MergedLogEntry] = deque(maxlen=maxlen)
-        self._req_logging_seen = False  # True once a request-log line is parsed
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
@@ -137,45 +114,25 @@ class AccessLogTailer(threading.Thread):
             self.error = str(exc)
 
     def _ingest(self, line: str) -> None:
-        now = time.time()
-
-        # A request-log line (--enable-log-requests) is self-describing: it
-        # carries the request id, max_tokens and (vLLM ≥ 0.11.3) the prompt. We
-        # surface it directly as a feed row rather than trying to correlate it
-        # with the access line — the access line has no request id and is logged
-        # at a different point in the request's life, so the two can't be
-        # matched reliably under concurrency.
+        # We only surface vLLM request-log lines (--enable-log-requests): they
+        # are self-describing, carrying the request id, max_tokens and (vLLM ≥
+        # 0.11.3) the prompt — the actual inference requests. Uvicorn access
+        # lines (the HTTP envelope and status) are deliberately ignored: they
+        # have no request id and are logged at a different point in the
+        # request's life, so they can't be correlated, and the prompt/tokens
+        # are what's interesting anyway.
         m = _NEW_REQUEST_RE.search(line) or _OLD_REQUEST_RE.search(line)
-        if m:
-            gd = m.groupdict()
-            prompt = gd.get('prompt')  # None for old format (no 'prompt' group)
-            entry = MergedLogEntry(
-                t=now, method="POST",
+        if not m:
+            return
+        gd = m.groupdict()
+        prompt = gd.get('prompt')  # None for old format (no 'prompt' group)
+        with self._lock:
+            self._merged.append(MergedLogEntry(
+                t=time.time(), method="POST",
                 path=endpoint_for_request_id(gd['id']),
                 request_id=gd['id'], max_tokens=int(gd['tok']),
                 prompt=prompt if prompt else None,
-            )
-            with self._lock:
-                self._req_logging_seen = True
-                self._merged.append(entry)
-            return
-
-        # A uvicorn access line carries the client and HTTP status but no prompt.
-        # When request logging is on, every inference request already produces a
-        # request-log row, so the access line is redundant and we skip it. When
-        # request logging is off, access lines are the only per-request signal,
-        # so they become the feed.
-        parsed = parse_access_line(line)
-        if parsed is not None:
-            client, method, path, status = parsed
-            if path.split("?", 1)[0] in self.IGNORE_PATHS:
-                return
-            with self._lock:
-                if self._req_logging_seen:
-                    return
-                self._merged.append(MergedLogEntry(
-                    t=now, client=client, method=method,
-                    path=path, status=status))
+            ))
 
     def _follow_command(self, cmd: List[str]) -> None:
         try:

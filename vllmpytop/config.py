@@ -1,3 +1,10 @@
+"""Runtime configuration: defaults, app config, and env-variable support.
+
+The :class:`AppConfig` dataclass is the single source of truth passed to every
+collector and the UI. Defaults live as module constants so they can be
+imported by tests and the ``--dump-json`` path.
+"""
+
 from __future__ import annotations
 
 import os

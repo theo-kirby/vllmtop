@@ -1,4 +1,4 @@
-"""The five bordered panels, btop-style. Each draws into a Rect on screen."""
+"""The four bordered panels, btop-style. Each draws into a Rect on screen."""
 
 from __future__ import annotations
 
@@ -511,20 +511,21 @@ def draw_throughput(p: Painter, rect: Rect, snap: Snapshot, hist: History,
 
 def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
                   num: int = 0) -> None:
+    """Request feed panel — live list of vLLM inference requests.
+
+    Each row shows request age, prompt text (truncated), request ID, and
+    max_tokens. Prompt text requires vLLM ≥ 0.11.3 with ``--enable-log-requests``.
+    Without a log source, a hint tells you how to enable the feed. Newest first.
+    """
     t = p.theme
     inner = p.box(rect, "requests", num, title2="activity",
                   border_pair=PAIR_BOX_REQ)
     if inner.h <= 0:
         return
 
-    # Running / waiting / kv-cache bars moved to the vllm panel.
-    # This panel now shows only the merged request feed.
-    # Shows HTTP method, endpoint, status, and (when --enable-log-requests is
-    # active) the vLLM prompt text (truncated), request ID, and max_tokens.
-    # Prompt is available on vLLM ≥ 0.11.3. Newest first.
     p.text(inner.y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
     feed_rect = Rect(inner.y + 1, inner.x, inner.h - 1, inner.w)
-    _draw_merged_feed(p, feed_rect, snap.merged_log, snap.access_error)
+    _draw_request_feed(p, feed_rect, snap.merged_log, snap.access_error)
 
 
 def _draw_perf_stacked(p: Painter, inner: Rect, hist: History,
@@ -564,7 +565,8 @@ def _draw_perf_stacked(p: Painter, inner: Rect, hist: History,
 
 def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
               num: int = 0) -> None:
-    """Latency metrics (recent avg) beside the KV-cache usage chart."""
+    """Latency metrics (recent avg) beside the KV-cache usage chart,
+    with per-request phase-timing sparklines below a divider."""
     t = p.theme
     inner = p.box(rect, "perf", num, title2="recent avg",
                   border_pair=PAIR_BOX_LAT)
@@ -653,12 +655,20 @@ def _truncate_prompt(prompt: str, maxlen: int = 30) -> str:
     return text
 
 
-def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
-    """Render the merged request feed into ``rect`` — no box.
+def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
+    """Render the vLLM inference request feed into ``rect`` — no box.
 
-    Each entry carries access-log fields (age, method, endpoint, status)
-    optionally enriched with request-log fields (request_id, max_tokens, prompt)
-    when vLLM runs with --enable-log-requests. Newest first.
+    Each row is one request parsed from vLLM's request log
+    (``--enable-log-requests``): its prompt text (truncated), request id and
+    max_tokens. Prompt is available on vLLM ≥ 0.11.3. Newest first.
+
+    Columns (left to right, right columns drop out on narrow panels):
+
+        age  prompt (flex)  req id  max_tok
+
+    ``age`` is how long ago the request was observed. ``prompt`` fills the
+    available width. ``req id`` and ``max_tok`` are fixed-width and drop off
+    as the panel narrows below 40 and 26 columns respectively.
     """
     t = p.theme
     if rect.h <= 0 or rect.w <= 0:
@@ -668,73 +678,34 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
                t.attr(PAIR_YELLOW, dim=True))
         return
     if not entries:
-        hint = "pass --docker <name> or --log-file <path> to show recent calls"
+        hint = "run vLLM with --enable-log-requests to show inference requests"
         p.text(rect.y, rect.x, hint[: rect.w], t.attr(PAIR_DIM, dim=True))
         return
 
     now = time.time()
 
-    # Adapt columns based on width and whether request/prompt data is available.
-    has_req = any(e.request_id is not None for e in entries)
-    has_prompt = any(e.prompt is not None for e in entries)
+    # Columns: age | prompt (flex) | req id | max_tok. The prompt is the most
+    # useful column so it flexes to fill the row; req id and max_tok are
+    # fixed-width on the right and drop out as the panel narrows.
+    age_w, req_w, tok_w = 4, 13, 6
+    x_age = rect.x
+    x_prompt = x_age + age_w + 1
+    show_req = rect.w >= 40
+    show_tok = rect.w >= 26
 
-    if has_prompt and rect.w >= 58:
-        # Prompt layout: age | verb | endpoint | prompt
-        # Request-log-driven rows have no HTTP status (logged at arrival), so
-        # the code column is dropped here in favour of the prompt. Endpoint is
-        # fixed-width (truncated) and the prompt flexes to fill the rest — it's
-        # the most useful column, so it gets the space.
-        age_w, code_w, meth_w, path_w = 4, 0, 5, 20
-        x_age = rect.x
-        x_code = 0
-        x_meth = x_age + age_w + 1
-        x_path = x_meth + meth_w + 1
-        x_prompt = x_path + path_w + 1
-        prompt_w = max(5, rect.x + rect.w - x_prompt)
+    trailing = (req_w + 1 if show_req else 0) + (tok_w + 1 if show_tok else 0)
+    prompt_w = max(4, rect.x + rect.w - x_prompt - trailing)
+    x_after_prompt = x_prompt + prompt_w + 1
+    x_req = x_after_prompt
+    x_tok = (x_req + req_w + 1) if show_req else x_after_prompt
 
-        hdr = t.attr(PAIR_DIM, dim=True)
-        p.text(rect.y, x_age, "age", hdr)
-        p.text(rect.y, x_meth, "verb", hdr)
-        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
-        p.text(rect.y, x_prompt, "prompt"[:prompt_w], hdr)
-    elif has_req and rect.w >= 52:
-        # Wide layout: age | code | verb | endpoint | req_id | max_tok
-        age_w, code_w, meth_w, req_w, tok_w = 4, 4, 5, 13, 6
-        x_age = rect.x
-        x_code = x_age + age_w + 1
-        x_meth = x_code + code_w + 1
-        x_path = x_meth + meth_w + 1
-        # Path takes remaining space after fixed cols, minus space for req_id+max_tok
-        trailing = req_w + tok_w + 2  # 2 dividers
-        path_w = max(5, rect.w - (age_w + code_w + meth_w + trailing + 3))
-        x_req = x_path + path_w + 1
-        x_tok = x_req + req_w + 1
-        prompt_w = 0
-        x_prompt = 0
-
-        hdr = t.attr(PAIR_DIM, dim=True)
-        p.text(rect.y, x_age, "age", hdr)
-        p.text(rect.y, x_code, "code", hdr)
-        p.text(rect.y, x_meth, "verb", hdr)
-        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
+    hdr = t.attr(PAIR_DIM, dim=True)
+    p.text(rect.y, x_age, "age", hdr)
+    p.text(rect.y, x_prompt, "prompt"[:prompt_w], hdr)
+    if show_req:
         p.text(rect.y, x_req, "req id"[:req_w], hdr)
+    if show_tok:
         p.text(rect.y, x_tok, "max_tok"[:tok_w], hdr)
-    else:
-        # Narrow layout: age | code | verb | endpoint (flex)
-        age_w, code_w, meth_w = 4, 4, 5
-        x_age = rect.x
-        x_code = x_age + age_w + 1
-        x_meth = x_code + code_w + 1
-        x_path = x_meth + meth_w + 1
-        path_w = max(4, rect.x + rect.w - x_path)
-        req_w = tok_w = prompt_w = 0
-        x_req = x_tok = x_prompt = 0
-
-        hdr = t.attr(PAIR_DIM, dim=True)
-        p.text(rect.y, x_age, "age", hdr)
-        p.text(rect.y, x_code, "code", hdr)
-        p.text(rect.y, x_meth, "verb", hdr)
-        p.text(rect.y, x_path, "endpoint"[:path_w], hdr)
 
     for i, e in enumerate(entries):
         y = rect.y + 1 + i
@@ -742,25 +713,16 @@ def _draw_merged_feed(p: Painter, rect: Rect, entries, error=None) -> None:
             break
         p.text(y, x_age, fmt_duration(max(0.0, now - e.t)).rjust(age_w)[:age_w],
                t.attr(PAIR_DIM))
-        if code_w:
-            if e.status is None:
-                p.text(y, x_code, "—".rjust(code_w)[:code_w],
-                       t.attr(PAIR_DIM, dim=True))
-            else:
-                code_pair = (PAIR_RED if e.status >= 500
-                             else PAIR_YELLOW if e.status >= 400 else PAIR_GREEN)
-                p.text(y, x_code, str(e.status), t.attr(code_pair, bold=True))
-        p.text(y, x_meth, e.method[:meth_w], t.attr(PAIR_DIM))
-        p.text(y, x_path, e.path[:path_w], t.attr(PAIR_TITLE))
-        if prompt_w:
-            ptext = _truncate_prompt(e.prompt, prompt_w) if e.prompt else ""
-            p.text(y, x_prompt, ptext.ljust(prompt_w)[:prompt_w],
-                   t.attr(PAIR_PROMPT) if e.prompt else t.attr(PAIR_DIM, dim=True))
-        elif req_w:
-            rid = (e.request_id[:12] if e.request_id else "—")
+        ptext = _truncate_prompt(e.prompt, prompt_w) if e.prompt else ""
+        p.text(y, x_prompt, ptext.ljust(prompt_w)[:prompt_w],
+               t.attr(PAIR_PROMPT) if e.prompt else t.attr(PAIR_DIM, dim=True))
+        if show_req:
+            rid = e.request_id[:req_w] if e.request_id else "—"
             p.text(y, x_req, rid.ljust(req_w)[:req_w],
                    t.attr(PAIR_CYAN) if e.request_id else t.attr(PAIR_DIM, dim=True))
-            tok_val = f"{e.max_tokens:>5}" if e.max_tokens is not None else "     -"
+        if show_tok:
+            tok_val = (f"{e.max_tokens:>{tok_w}}" if e.max_tokens is not None
+                       else "-".rjust(tok_w))
             p.text(y, x_tok, tok_val[:tok_w],
                    t.attr(PAIR_CYAN, bold=True) if e.max_tokens is not None
                    else t.attr(PAIR_DIM, dim=True))

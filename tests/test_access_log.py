@@ -1,38 +1,14 @@
 from vllmpytop.collectors.access_log import (
-    AccessLogTailer, MAX_PROMPT_DISPLAY, parse_access_line)
+    AccessLogTailer, MAX_PROMPT_DISPLAY)
 from vllmpytop.ui.panels import _truncate_prompt
 
 
-def test_parse_real_vllm_line():
-    line = ('(APIServer pid=1) INFO:     192.168.32.2:41854 - '
-            '"POST /v1/chat/completions HTTP/1.1" 200 OK')
-    assert parse_access_line(line) == (
-        "192.168.32.2:41854", "POST", "/v1/chat/completions", 200)
-
-
-def test_parse_status_codes_and_methods():
-    assert parse_access_line('1.2.3.4:5 - "GET /metrics HTTP/1.1" 200 OK') == (
-        "1.2.3.4:5", "GET", "/metrics", 200)
-    assert parse_access_line('1.2.3.4:5 - "POST /v1/x HTTP/1.1" 404 Not Found')[3] == 404
-
-
-def test_parse_non_access_lines_return_none():
-    assert parse_access_line("Successfully import tool parser Qwen3XMLToolParser !") is None
-    assert parse_access_line(
-        "INFO 05-30 [loggers.py:271] Engine 000: Avg prompt throughput: 1754") is None
-    assert parse_access_line("") is None
-
-
-def test_tailer_filters_infra_endpoints():
+def test_access_lines_are_ignored():
+    """Uvicorn access lines (HTTP envelope/status) no longer produce rows."""
     tailer = AccessLogTailer(file="/nonexistent")  # not started
-    tailer._ingest('1.1.1.1:2 - "GET /metrics HTTP/1.1" 200 OK')  # ignored
-    tailer._ingest('1.1.1.1:2 - "GET /health HTTP/1.1" 200 OK')  # ignored
     tailer._ingest('9.9.9.9:8 - "POST /v1/chat/completions HTTP/1.1" 200 OK')
-    snap = tailer.merged_log()
-    assert len(snap) == 1
-    assert snap[0].path == "/v1/chat/completions"
-    assert snap[0].client == "9.9.9.9:8"
-    assert snap[0].ok is True
+    tailer._ingest('1.1.1.1:2 - "GET /metrics HTTP/1.1" 200 OK')
+    assert tailer.merged_log() == []
 
 
 def test_prompt_parse_vllm_new_format():
@@ -59,18 +35,6 @@ def test_prompt_parse_vllm_new_format():
     assert e.status is None
     # Prompt is unquoted (regex strips the surrounding quotes from %r format)
     assert e.prompt == "Hello, how are you?"
-
-
-def test_access_line_suppressed_once_request_logging_seen():
-    """When request logging is on, the access line is redundant and skipped."""
-    tailer = AccessLogTailer(file="/nonexistent")
-    tailer._ingest(
-        "Received request chatcmpl-abc: prompt: 'hi', "
-        "params: SamplingParams(n=1, max_tokens=100), lora_request: None."
-    )
-    tailer._ingest('1.2.3.4:5678 - "POST /v1/chat/completions HTTP/1.1" 200 OK')
-    # Only the request-log row, not a second row from the access line.
-    assert len(tailer.merged_log()) == 1
 
 
 def test_prompt_parse_vllm_old_format():

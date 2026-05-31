@@ -1,4 +1,9 @@
-"""Command-line entry point: argparse, then either --dump-json or the TUI."""
+"""Command-line entry point: argparse → ``--dump-json`` headless or curses TUI.
+
+``--dump-json`` takes two snapshots an interval apart (so rates are populated),
+serialises everything to JSON, and exits — works without a TTY. Without the
+flag the curses :class:`~ui.app.App` runs in an interactive loop.
+"""
 
 from __future__ import annotations
 
@@ -41,17 +46,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--log-file", default=os.environ.get("VLLMTOP_LOG_FILE"),
         metavar="PATH",
-        help="tail this file (uvicorn access log) for the activity panel "
+        help="tail this vLLM log file for the requests panel "
              "(env VLLMTOP_LOG_FILE)",
     )
     p.add_argument(
         "--docker", metavar="CONTAINER", default=os.environ.get("VLLMTOP_DOCKER"),
-        help="stream `docker logs -f` from this container for the activity panel "
+        help="stream `docker logs -f` from this container for the requests panel "
              "(env VLLMTOP_DOCKER)",
     )
     p.add_argument(
         "--dump-json", action="store_true",
-        help="collect a snapshot, print it as JSON, and exit (no TTY needed)",
+        help="collect two snapshots, print derived metrics as JSON, and exit (no TTY needed)",
     )
     return p
 

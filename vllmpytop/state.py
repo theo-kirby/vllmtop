@@ -4,6 +4,17 @@ The collectors produce *raw* snapshots (current counter/gauge values). The UI
 thread feeds successive snapshots into a :class:`History`, which turns counters
 into rates and histograms into recent-average latencies, appending the derived
 values to per-series ring buffers for charting.
+
+Public types:
+- :class:`Series` — fixed-length ring buffer for chart history
+- :class:`Histogram` — Prometheus histogram cumulative state
+- :class:`VllmSnapshot` — raw vLLM /metrics scrape
+- :class:`GpuSnapshot` — raw NVML GPU poll
+- :class:`MergedLogEntry` — one row in the request feed
+- :class:`Snapshot` — combined vLLM + GPU + log sample
+- :func:`compute_rate` — monotonic counter delta / time delta
+- :func:`histogram_recent_avg` — recent mean from delta sum/count
+- :func:`histogram_quantile` — approximate quantile in a window
 """
 
 from __future__ import annotations
@@ -121,56 +132,19 @@ class GpuSnapshot:
 
 
 @dataclass
-class RequestLogEntry:
-    """One parsed vLLM request-log line (from --enable-log-requests).
-
-    The ``prompt`` field is populated on vLLM ≥ 0.11.3 (PR #29227 fixed a
-    regression where it was only logged at DEBUG level). For older versions
-    it will be ``None``.
-    """
-
-    t: float  # wall-clock time we read the line
-    request_id: str  # e.g. "chatcmpl-8e11840cfdc1ffc2"
-    max_tokens: int  # max generation length requested
-    prompt: Optional[str] = None  # input prompt text (truncated by vLLM)
-
-
-@dataclass
-class AccessLogEntry:
-    """One parsed uvicorn access-log line (an HTTP call vLLM served).
-
-    Built from the server's logs, not its metrics — so it carries no prompt or
-    response text, only the request envelope: who called, which endpoint, the
-    status, and when we observed it.
-    """
-
-    t: float  # wall-clock time we read the line (time.time())
-    client: str  # "ip:port"
-    method: str  # "POST"
-    path: str  # "/v1/chat/completions"
-    status: int  # 200
-
-    @property
-    def ok(self) -> bool:
-        return 200 <= self.status < 400
-
-
-@dataclass
 class MergedLogEntry:
     """One row in the request feed.
 
-    Two sources can produce a row:
+    Produced from a vLLM request-log line (``--enable-log-requests``), carrying
+    ``request_id``, ``max_tokens`` and optionally ``prompt`` (vLLM ≥ 0.11.3,
+    PR #29227). The ``path`` (endpoint) is inferred from the request-id prefix
+    so each row can display a meaningful endpoint column. ``status`` is
+    ``None`` because the request-log line is emitted at arrival, before
+    completion.
 
-    * A vLLM request-log line (``--enable-log-requests``) — carries
-      ``request_id``, ``max_tokens`` and ``prompt`` (prompt on vLLM ≥ 0.11.3,
-      PR #29227). The endpoint is inferred from the request-id prefix and
-      ``status`` is ``None`` because it is logged at arrival, before completion.
-    * A uvicorn access line — carries ``client`` and ``status`` but no prompt.
-      Used as a fallback when request logging is off.
-
-    Access lines and request-log lines can't be reliably correlated (the access
-    line has no request id and is emitted at a different time), so each source
-    produces its own rows rather than being merged.
+    Legacy fields (``client``, ``method``) are present for backward compatibility
+    but are not populated by the current log parser, which only surfaces
+    vLLM request-log lines (not uvicorn access lines).
     """
 
     t: float

@@ -1,4 +1,10 @@
-"""The curses application: background poller thread + render loop."""
+"""The curses application: background poller thread + render loop.
+
+:class:`Poller` runs in a daemon thread, scraping vLLM /metrics and polling
+NVML at the configured interval. The main thread loops at a faster tick
+(250 ms), reading the latest snapshot, deriving rates from the :class:`History`,
+and redrawing the panels. Panel visibility is toggled with ``1``-``4``.
+"""
 
 from __future__ import annotations
 
