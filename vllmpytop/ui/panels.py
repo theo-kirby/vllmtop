@@ -645,11 +645,20 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
 
 
 def _truncate_prompt(prompt: str, maxlen: int = 30) -> str:
-    """Truncate a prompt for display, normalizing whitespace and adding … when needed."""
+    """Truncate a prompt for display, normalizing whitespace and adding … when needed.
+
+    Prompts are end-user-supplied (they arrive via the vLLM request log), so we
+    also strip control characters — ESC, BEL, C1, etc. — that ``str.split()``
+    leaves behind and that could otherwise carry terminal escape sequences into
+    the operator's terminal. curses neutralises these too, but stripping makes
+    the safety explicit and protects any non-curses rendering path.
+    """
     if not prompt:
         return ""
-    # Normalize: collapse newlines and leading/trailing whitespace for terminal display
+    # Normalize whitespace, then drop C0/C1 control chars (e.g. ESC 0x1b) so no
+    # escape sequence can reach the terminal.
     text = " ".join(prompt.split())
+    text = "".join(c for c in text if ord(c) >= 0x20 and not 0x7f <= ord(c) < 0xa0)
     if len(text) > maxlen:
         return text[:maxlen - 1] + "…"
     return text

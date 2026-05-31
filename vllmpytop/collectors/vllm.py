@@ -25,6 +25,11 @@ _SCALAR_NAMES = (
     "vllm:request_success_total",
 )
 
+# Cap on a single /metrics body. The endpoint is plain text and normally well
+# under 1 MB; this bounds memory if a compromised/misconfigured server (or a
+# MITM on plain HTTP) streams an unbounded body.
+MAX_METRICS_BYTES = 16 * 1024 * 1024
+
 # Histogram base names -> attribute on VllmSnapshot.
 _HISTOGRAMS = {
     "vllm:time_to_first_token_seconds": "ttft",
@@ -144,7 +149,13 @@ class VllmCollector:
             )
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 charset = resp.headers.get_content_charset() or "utf-8"
-                text = resp.read().decode(charset, errors="replace")
+                raw = resp.read(MAX_METRICS_BYTES + 1)
+                if len(raw) > MAX_METRICS_BYTES:
+                    return VllmSnapshot(
+                        reachable=False,
+                        error=f"/metrics body exceeded {MAX_METRICS_BYTES} bytes",
+                    )
+                text = raw.decode(charset, errors="replace")
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return VllmSnapshot(reachable=False, error=_short_error(exc))
 
