@@ -1,9 +1,21 @@
-"""Compute panel rectangles from the terminal size; reflow on resize."""
+"""Layout primitives: a recursive split tree placed into terminal rects.
+
+A *view* is a tree of nested splits referencing panels by id. Each :class:`Node`
+is either a leaf (a single panel) or a split arranging its children in a row
+(side by side, splitting width) or a column (stacked, splitting height), sized
+proportional to per-child weights.
+
+:func:`compute_layout` prunes panels that aren't available (e.g. the gpu panel
+on a CPU-only host), reflows the remaining tree, and returns the screen
+:class:`Rect` for each visible panel. This replaces the old hand-wired
+2-column grid: the original "overview" arrangement is now just one tree literal
+in ``views.py``.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Optional
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional, Set, Tuple
 
 MIN_COLS = 62
 MIN_LINES = 20
@@ -17,41 +29,52 @@ class Rect:
     w: int
 
 
+@dataclass(frozen=True)
+class Node:
+    """A node in a view's layout tree.
+
+    A leaf carries ``panel`` (its panel id) and no children. A split carries
+    ``children`` and ``vertical`` (True = stack into a column, splitting
+    height; False = lay out side by side in a row, splitting width).
+    ``weight`` sizes this node against its siblings.
+    """
+
+    weight: int = 1
+    panel: Optional[str] = None
+    vertical: bool = False
+    children: Tuple["Node", ...] = ()
+
+
+def leaf(panel: str, weight: int = 1) -> Node:
+    return Node(weight=weight, panel=panel)
+
+
+def row(*children: Node, weight: int = 1) -> Node:
+    """Arrange children side by side (split the available width)."""
+    return Node(weight=weight, vertical=False, children=tuple(children))
+
+
+def col(*children: Node, weight: int = 1) -> Node:
+    """Stack children top to bottom (split the available height)."""
+    return Node(weight=weight, vertical=True, children=tuple(children))
+
+
 @dataclass
 class Layout:
     panels: Dict[str, Rect]
     too_small: bool = False
 
 
-def _split(start: int, total: int, n: int) -> list[tuple[int, int]]:
-    """Split `total` into n segments, distributing the remainder to the front."""
-    base = total // n
-    rem = total % n
-    out = []
-    pos = start
-    for i in range(n):
-        seg = base + (1 if i < rem else 0)
-        out.append((pos, seg))
-        pos += seg
-    return out
-
-
-# The grid below the GPU panel is two columns. `requests` gets a column to
-# itself so it's tall enough for its call feed; the rest stack opposite.
-GRID_LEFT = ("throughput", "perf")
-GRID_RIGHT = ("requests",)
-GRID_ORDER = GRID_LEFT + GRID_RIGHT
-
-# Relative heights when panels stack in a column. `throughput` is taller
-# because it carries both the mirrored chart and the stats column.
-GRID_WEIGHTS = {"throughput": 3, "perf": 2}
-
-
 def _split_weighted(start: int, total: int,
-                    weights: list[int]) -> list[tuple[int, int]]:
-    """Like :func:`_split` but each segment sized proportional to its weight."""
+                    weights: List[int]) -> List[Tuple[int, int]]:
+    """Split ``total`` into segments proportional to ``weights``.
+
+    The last segment absorbs the rounding remainder so the segments exactly
+    tile ``[start, start + total)``.
+    """
     tw = sum(weights) or 1
-    out, pos, used = [], start, 0
+    out: List[Tuple[int, int]] = []
+    pos, used = start, 0
     for i, wt in enumerate(weights):
         seg = (total - used) if i == len(weights) - 1 else (total * wt) // tw
         out.append((pos, seg))
@@ -60,56 +83,54 @@ def _split_weighted(start: int, total: int,
     return out
 
 
-def _place_column(panels: Dict[str, "Rect"], names, x: int, w: int,
-                  y: int, h: int) -> None:
-    """Stack `names` vertically within the column at (x, w), spanning (y, h)."""
-    weights = [GRID_WEIGHTS.get(n, 1) for n in names]
-    for name, (ry, rh) in zip(names, _split_weighted(y, h, weights)):
-        panels[name] = Rect(ry, x, rh, w)
+def prune(node: Optional[Node], available: Set[str]) -> Optional[Node]:
+    """Drop leaves whose panel isn't available and collapse empty splits.
+
+    A split with a single surviving child collapses to that child (keeping the
+    parent's weight, so the survivor inherits the parent's slot). Returns
+    ``None`` when nothing in the subtree is available.
+    """
+    if node is None:
+        return None
+    if node.panel is not None:
+        return node if node.panel in available else None
+    kids = [k for k in (prune(c, available) for c in node.children) if k]
+    if not kids:
+        return None
+    if len(kids) == 1:
+        return replace(kids[0], weight=node.weight)
+    return replace(node, children=tuple(kids))
 
 
-def compute_layout(lines: int, cols: int, enabled) -> Layout:
-    """Lay out the footer and the enabled panels for the terminal size.
+def _place(node: Node, rect: Rect, out: Dict[str, Rect]) -> None:
+    if node.panel is not None:
+        out[node.panel] = rect
+        return
+    weights = [c.weight for c in node.children]
+    if node.vertical:
+        for child, (ry, rh) in zip(
+            node.children, _split_weighted(rect.y, rect.h, weights)
+        ):
+            _place(child, Rect(ry, rect.x, rh, rect.w), out)
+    else:
+        for child, (rx, rw) in zip(
+            node.children, _split_weighted(rect.x, rect.w, weights)
+        ):
+            _place(child, Rect(rect.y, rx, rect.h, rw), out)
 
-    Panels start at the top of the screen (no header or footer bar). GPU (if
-    enabled) spans the full width; the remaining enabled panels reflow into a
-    2-column grid below. Hiding panels gives the rest more room, matching btop.
+
+def compute_layout(lines: int, cols: int, view: Node,
+                   available: Set[str]) -> Layout:
+    """Place ``view``'s available panels into the terminal rect.
+
+    Panels start at the top of the screen (no header/footer bar). Panels not in
+    ``available`` are pruned and the rest reflow to fill the freed space.
     """
     if cols < MIN_COLS or lines < MIN_LINES:
         return Layout(panels={}, too_small=True)
-
-    body_y = 0
-    body_h = lines  # full height; no footer bar
-    body_w = cols
-
-    gpu_on = "gpu" in enabled
-    grid = [name for name in GRID_ORDER if name in enabled]
-
-    panels: Dict[str, Rect] = {}
-
-    # The gpu slot spans a fraction of the height so the grid panels below
-    # get more room for their charts and feeds.
-    if gpu_on and grid:
-        gpu_h = max(8, int(body_h * 0.4))
-    elif gpu_on:
-        gpu_h = body_h
-    else:
-        gpu_h = 0
-
-    if gpu_on:
-        panels["gpu"] = Rect(body_y, 0, gpu_h, body_w)
-
-    grid_y = body_y + gpu_h
-    grid_h = body_h - gpu_h
-
-    if grid and grid_h > 0:
-        left = [n for n in GRID_LEFT if n in enabled]
-        right = [n for n in GRID_RIGHT if n in enabled]
-        if left and right:
-            (lx, lw), (rx, rw) = _split(0, body_w, 2)
-            _place_column(panels, left, lx, lw, grid_y, grid_h)
-            _place_column(panels, right, rx, rw, grid_y, grid_h)
-        else:  # only one column populated -> it spans the full width
-            _place_column(panels, left or right, 0, body_w, grid_y, grid_h)
-
-    return Layout(panels=panels, too_small=False)
+    pruned = prune(view, available)
+    if pruned is None:
+        return Layout(panels={}, too_small=False)
+    out: Dict[str, Rect] = {}
+    _place(pruned, Rect(0, 0, lines, cols), out)
+    return Layout(panels=out, too_small=False)

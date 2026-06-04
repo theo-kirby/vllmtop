@@ -22,7 +22,6 @@ from .theme import (
     PAIR_INACTIVE,
     PAIR_MAGENTA,
     PAIR_PINK,
-    PAIR_PROMPT,
     PAIR_PURPLE,
     PAIR_RED,
     PAIR_TITLE,
@@ -644,6 +643,70 @@ def draw_perf(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     _draw_stat_column(p, inner.y, inner.h, rx, rw, rows)
 
 
+# Metrics shown in the 1·5·15 windowed-average panel:
+# (label, series key, is_latency). Latencies render with fmt_seconds; the rest
+# with big_number.
+_LOADAVG_ROWS = [
+    ("gen tok/s", "gen_tok_s", False),
+    ("prompt tok/s", "prompt_tok_s", False),
+    ("running", "running", False),
+    ("waiting", "waiting", False),
+    ("gpu util", "gpu_util", False),
+    ("gpu mem", "gpu_mem_perc", False),
+    ("kv cache", "kv_cache", False),
+    ("ttft", "ttft", True),
+    ("tpot", "tpot", True),
+    ("e2e", "e2e", True),
+    ("queue", "queue_time", True),
+]
+
+
+def draw_loadavg(p: Painter, rect: Rect, snap: Snapshot, hist: History,
+                 num: int = 0) -> None:
+    """1·5·15 panel — load-average style windowed means of the key metrics.
+
+    Each row shows the current value beside its 1-, 5- and 15-minute
+    exponential moving averages (``History.avg``), so a glance tells you whether
+    load is rising or falling across each horizon. The "now" column is bold; the
+    window columns are dim, matching btop's "current vs. history" emphasis.
+    """
+    t = p.theme
+    inner = p.box(rect, "1·5·15", num, title2="windowed avg",
+                  border_pair=PAIR_BOX_CACHE)
+    if inner.h <= 0 or inner.w <= 0:
+        return
+
+    # Five columns: a flexible label, then now / 1m / 5m / 15m right-aligned.
+    num_w = max(6, min(9, inner.w // 6))
+    label_w = inner.w - num_w * 4
+    if label_w < 8:
+        num_w = max(5, (inner.w - 8) // 4)
+        label_w = inner.w - num_w * 4
+    if label_w < 6 or num_w < 5:
+        return  # too narrow for the table
+
+    def cell(y: int, col_i: int, s: str, pair: int, bold: bool) -> None:
+        s = s[:num_w]
+        cx = inner.x + label_w + col_i * num_w
+        p.text(y, cx + num_w - len(s), s, t.attr(pair, bold=bold))
+
+    # Header row.
+    p.text(inner.y, inner.x, "metric"[:label_w], t.attr(PAIR_DIM, dim=True))
+    for i, h in enumerate(("now", "1m", "5m", "15m")):
+        cell(inner.y, i, h, PAIR_DIM, False)
+
+    for r, (label, key, is_lat) in enumerate(_LOADAVG_ROWS):
+        y = inner.y + 1 + r
+        if y >= inner.y + inner.h:
+            break
+        p.text(y, inner.x, label[:label_w], t.attr(PAIR_DIM))
+        emas = hist.avg.get(key) or [0.0, 0.0, 0.0]
+        values = (hist.derived.get(key, 0.0), emas[0], emas[1], emas[2])
+        for i, v in enumerate(values):
+            s = fmt_seconds(v) if is_lat else big_number(v)
+            cell(y, i, s, PAIR_TITLE if i == 0 else PAIR_DIM, i == 0)
+
+
 def _truncate_prompt(prompt: str, maxlen: int = 30) -> str:
     """Truncate a prompt for display, normalizing whitespace and adding … when needed.
 
@@ -664,20 +727,32 @@ def _truncate_prompt(prompt: str, maxlen: int = 30) -> str:
     return text
 
 
+def _fmt_chars(n: int) -> str:
+    """Compact character count for the feed's size column: 42, 1.2k, 440k, 1.3M."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1000:.0f}k"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
 def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
     """Render the vLLM inference request feed into ``rect`` — no box.
 
     Each row is one request parsed from vLLM's request log
-    (``--enable-log-requests``): its prompt text (truncated), request id and
-    max_tokens. Prompt is available on vLLM ≥ 0.11.3. Newest first.
+    (``--enable-log-requests``): its request id, logged prompt size (chars) and
+    max_tokens. Newest first.
 
     Columns (left to right, right columns drop out on narrow panels):
 
-        age  prompt (flex)  req id  max_tok
+        age  req id (flex)  size  max_tok
 
-    ``age`` is how long ago the request was observed. ``prompt`` fills the
-    available width. ``req id`` and ``max_tok`` are fixed-width and drop off
-    as the panel narrows below 40 and 26 columns respectively.
+    ``age`` is how long ago the request was observed. ``req id`` flexes to fill
+    the available width. ``size`` is the logged prompt length in characters
+    (exact, not a token count), and ``max_tok`` is the output cap; both are
+    fixed-width on the right and drop off as the panel narrows.
     """
     t = p.theme
     if rect.h <= 0 or rect.w <= 0:
@@ -693,26 +768,25 @@ def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
 
     now = time.time()
 
-    # Columns: age | prompt (flex) | req id | max_tok. The prompt is the most
-    # useful column so it flexes to fill the row; req id and max_tok are
-    # fixed-width on the right and drop out as the panel narrows.
-    age_w, req_w, tok_w = 4, 13, 6
+    # Columns: age | req id (flex) | size | max_tok. The request id flexes to
+    # fill the row; size and max_tok are fixed-width on the right and drop out
+    # as the panel narrows.
+    age_w, size_w, tok_w = 4, 6, 6
     x_age = rect.x
-    x_prompt = x_age + age_w + 1
-    show_req = rect.w >= 40
-    show_tok = rect.w >= 26
+    x_req = x_age + age_w + 1
+    show_tok = rect.w >= 20
+    show_size = rect.w >= 28
 
-    trailing = (req_w + 1 if show_req else 0) + (tok_w + 1 if show_tok else 0)
-    prompt_w = max(4, rect.x + rect.w - x_prompt - trailing)
-    x_after_prompt = x_prompt + prompt_w + 1
-    x_req = x_after_prompt
-    x_tok = (x_req + req_w + 1) if show_req else x_after_prompt
+    trailing = (size_w + 1 if show_size else 0) + (tok_w + 1 if show_tok else 0)
+    req_w = max(4, rect.x + rect.w - x_req - trailing)
+    x_size = x_req + req_w + 1
+    x_tok = (x_size + size_w + 1) if show_size else (x_req + req_w + 1)
 
     hdr = t.attr(PAIR_DIM, dim=True)
     p.text(rect.y, x_age, "age", hdr)
-    p.text(rect.y, x_prompt, "prompt"[:prompt_w], hdr)
-    if show_req:
-        p.text(rect.y, x_req, "req id"[:req_w], hdr)
+    p.text(rect.y, x_req, "req id"[:req_w], hdr)
+    if show_size:
+        p.text(rect.y, x_size, "size".rjust(size_w)[:size_w], hdr)
     if show_tok:
         p.text(rect.y, x_tok, "max_tok"[:tok_w], hdr)
 
@@ -722,13 +796,14 @@ def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
             break
         p.text(y, x_age, fmt_duration(max(0.0, now - e.t)).rjust(age_w)[:age_w],
                t.attr(PAIR_DIM))
-        ptext = _truncate_prompt(e.prompt, prompt_w) if e.prompt else ""
-        p.text(y, x_prompt, ptext.ljust(prompt_w)[:prompt_w],
-               t.attr(PAIR_PROMPT) if e.prompt else t.attr(PAIR_DIM, dim=True))
-        if show_req:
-            rid = e.request_id[:req_w] if e.request_id else "—"
-            p.text(y, x_req, rid.ljust(req_w)[:req_w],
-                   t.attr(PAIR_CYAN) if e.request_id else t.attr(PAIR_DIM, dim=True))
+        rid = e.request_id[:req_w] if e.request_id else "—"
+        p.text(y, x_req, rid.ljust(req_w)[:req_w],
+               t.attr(PAIR_CYAN) if e.request_id else t.attr(PAIR_DIM, dim=True))
+        if show_size:
+            has_size = e.prompt_chars is not None
+            size_val = _fmt_chars(e.prompt_chars) if has_size else "—"
+            p.text(y, x_size, size_val.rjust(size_w)[:size_w],
+                   t.attr(PAIR_GREEN) if has_size else t.attr(PAIR_DIM, dim=True))
         if show_tok:
             tok_val = (f"{e.max_tokens:>{tok_w}}" if e.max_tokens is not None
                        else "-".rjust(tok_w))

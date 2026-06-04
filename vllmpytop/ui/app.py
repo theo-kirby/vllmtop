@@ -3,7 +3,8 @@
 :class:`Poller` runs in a daemon thread, scraping vLLM /metrics and polling
 NVML at the configured interval. The main thread loops at a faster tick
 (250 ms), reading the latest snapshot, deriving rates from the :class:`History`,
-and redrawing the panels. Panel visibility is toggled with ``1``-``4``.
+and redrawing the active view's panels. Views are switched with ``1``-``N`` (or
+``Tab``); each is a fixed layout tree defined in :mod:`.views`.
 """
 
 from __future__ import annotations
@@ -11,30 +12,26 @@ from __future__ import annotations
 import curses
 import threading
 import time
-from typing import Optional
+from typing import Optional, Set
 
 from ..collectors.access_log import AccessLogTailer
 from ..collectors.gpu import GpuCollector
 from ..collectors.vllm import VllmCollector
 from ..config import AppConfig
 from ..state import GpuSnapshot, History, MergedLogEntry, Snapshot, VllmSnapshot
-from . import panels
 from .layout import compute_layout
 from .panels import Painter
-from .theme import PAIR_DIM, PAIR_TITLE, PAIR_YELLOW, Theme
+from .registry import REGISTRY
+from .theme import PAIR_DIM, PAIR_HI, PAIR_TITLE, PAIR_YELLOW, Theme
+from .views import VIEWS
 
 # Render tick: how often the UI wakes to handle input / redraw (seconds).
 RENDER_TICK = 0.25
 MIN_INTERVAL = 0.2
 MAX_INTERVAL = 10.0
 
-# Panels in order; the index+1 is the superscript number / toggle key.
-PANELS = (
-    ("gpu", panels.draw_gpu),
-    ("throughput", panels.draw_throughput),
-    ("requests", panels.draw_requests),
-    ("perf", panels.draw_perf),
-)
+# How long (seconds) the view-name toast stays up after switching views.
+TOAST_SECONDS = 1.5
 
 
 class Poller(threading.Thread):
@@ -117,9 +114,28 @@ class App:
         # Force a full repaint next frame (after a layout change leaves stale
         # cells that curses' diff-based refresh would otherwise keep).
         self._force_clear = False
-        self.enabled = {name for name, _ in PANELS}
-        if config.no_gpu:
-            self.enabled.discard("gpu")
+        # Index into VIEWS; switched with the number keys / Tab.
+        self.active_view = 0
+        # When the view-name toast should stop showing (monotonic).
+        self._toast_until = 0.0
+
+    def _available(self) -> Set[str]:
+        """Panel ids drawable in the current environment.
+
+        A panel is available when every capability it ``requires`` is present.
+        The only capability today is ``"gpu"`` (a GPU collector exists); the
+        gpu panel itself still renders vLLM info when the GPU is transiently
+        unavailable, so the requirement gates on the collector, not live NVML.
+        """
+        caps: Set[str] = set()
+        if self.poller.gpu is not None:
+            caps.add("gpu")
+        if self.tailer is not None:
+            caps.add("log")
+        return {
+            pid for pid, panel in REGISTRY.items()
+            if set(panel.requires) <= caps
+        }
 
     def run(self) -> int:
         if self.tailer is not None:
@@ -164,20 +180,18 @@ class App:
                 self.poller.interval = max(MIN_INTERVAL, self.poller.interval / 2)
             elif ch == ord("-"):
                 self.poller.interval = min(MAX_INTERVAL, self.poller.interval * 2)
-            elif ord("1") <= ch <= ord("4"):
-                self._toggle_panel(ch - ord("1"))
+            elif ch == ord("\t"):
+                self._select_view((self.active_view + 1) % len(VIEWS))
+            elif ord("1") <= ch <= ord("9"):
+                self._select_view(ch - ord("1"))
             elif ch == curses.KEY_RESIZE:
                 self._force_clear = True  # layout recomputed each draw
 
-    def _toggle_panel(self, idx: int) -> None:
-        name = PANELS[idx][0]
-        # Don't re-enable the GPU panel when there's no GPU collector behind it.
-        if name == "gpu" and self.poller.gpu is None:
+    def _select_view(self, idx: int) -> None:
+        if not (0 <= idx < len(VIEWS)) or idx == self.active_view:
             return
-        if name in self.enabled:
-            self.enabled.discard(name)
-        else:
-            self.enabled.add(name)
+        self.active_view = idx
+        self._toast_until = time.monotonic() + TOAST_SECONDS
         self._force_clear = True  # panels reflow; repaint to drop stale cells
 
     # ---- drawing ----------------------------------------------------------
@@ -189,7 +203,8 @@ class App:
         else:
             stdscr.erase()
         lines, cols = stdscr.getmaxyx()
-        layout = compute_layout(lines, cols, self.enabled)
+        view = VIEWS[self.active_view]
+        layout = compute_layout(lines, cols, view.root, self._available())
         p = Painter(stdscr, self.theme)
 
         if layout.too_small:
@@ -202,15 +217,16 @@ class App:
 
         snap = self.last or Snapshot(time.monotonic(), VllmSnapshot(),
                                      GpuSnapshot(), merged_log=[])
-        for i, (name, fn) in enumerate(PANELS):
-            rect = layout.panels.get(name)
-            if rect is not None:
-                fn(p, rect, snap, self.history, i + 1)
+        for pid, rect in layout.panels.items():
+            REGISTRY[pid].draw(p, rect, snap, self.history)
 
         if not layout.panels:
-            msg = "all panels hidden — press 1-5 to show one"
+            msg = "no panels available in this view"
             p.text(lines // 2, max(0, (cols - len(msg)) // 2), msg,
                    self.theme.attr(PAIR_DIM, dim=True))
+
+        if time.monotonic() < self._toast_until:
+            self._draw_toast(p, cols, view.name)
 
         if self.show_help:
             self._draw_help(p, lines, cols)
@@ -218,19 +234,27 @@ class App:
         stdscr.noutrefresh()
         curses.doupdate()
 
+    def _draw_toast(self, p: Painter, cols: int, name: str) -> None:
+        """Briefly name the active view, top-centred, after a switch."""
+        label = f" {self.active_view + 1}/{len(VIEWS)}  {name} "
+        x = max(0, (cols - len(label)) // 2)
+        p.text(0, x, label, self.theme.attr(PAIR_HI, bold=True))
+
     def _draw_help(self, p: Painter, lines: int, cols: int) -> None:
         t = self.theme
+        views = "  ".join(f"{i + 1} {v.name}" for i, v in enumerate(VIEWS))
         body = [
             "vllmpytop — keybindings",
             "",
             "  q / Esc    quit",
             "  + / -      faster / slower refresh",
             "  p          pause / resume polling",
-            "  1 - 4      toggle a panel on / off",
+            "  Tab        cycle to the next view",
+            f"  1 - {len(VIEWS)}      switch view",
             "  h / ?      toggle this help",
             "",
-            "Panels: ¹gpu  ²throughput  ³requests  ⁴perf",
-            "  (gpu shows model + engine info; requests shows the call feed)",
+            "Views: " + views,
+            "  (panels unavailable on this host drop out automatically)",
             "",
             "press any key to close",
         ]

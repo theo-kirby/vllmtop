@@ -40,9 +40,9 @@ vllmtop                  # or vllmpytop
 - **Requests**: a live feed of inference calls, newest first (like btop's
   process list). When a log source is configured (`--docker <container>` or
   `--log-file <path>`) and vLLM runs with `--enable-log-requests`, each row
-  shows the request age, prompt text (truncated), request ID, and max_tokens.
-  Without `--enable-log-requests` the feed still shows entries but without
-  prompt text. With no log source, a hint reminds you to enable one.
+  shows the request age, request ID, prompt size (logged prompt length in
+  characters — exact, not a token count), and max_tokens. With no log source, a
+  hint reminds you to enable one.
 - **Perf** (recent average over the last poll interval — far more useful live
   than the cumulative average): TTFT, inter-token (TPOT), end-to-end, and queue
   latencies as colour-coded braille sparklines, each with a right-aligned value
@@ -116,11 +116,14 @@ The log file path and Docker container can be set via `VLLMTOP_LOG_FILE` and
 | `q` / `Esc` | quit |
 | `+` / `-` | faster / slower refresh |
 | `p` | pause / resume polling |
-| `1`–`4` | toggle a panel on/off (¹gpu ²throughput ³requests ⁴perf) |
+| `Tab` | cycle to the next view |
+| `1`–`4` | switch view (1 overview · 2 1·5·15 · 3 requests · 4 gpu) |
 | `h` / `?` | toggle help overlay |
 
-Each panel's title carries a superscript number (btop-style) showing the key
-that toggles it. Hiding panels reflows the rest to fill the freed space.
+Each view is a fixed layout of panels. The **1·5·15** view shows
+load-average-style 1-, 5- and 15-minute moving averages of the key metrics
+beside their current values. Panels a host can't supply (e.g. the GPU panel on
+a CPU-only box) drop out automatically and the rest reflow to fill the space.
 
 ### Headless smoke test
 

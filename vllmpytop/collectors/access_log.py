@@ -132,6 +132,7 @@ class AccessLogTailer(threading.Thread):
                 path=endpoint_for_request_id(gd['id']),
                 request_id=gd['id'], max_tokens=int(gd['tok']),
                 prompt=prompt if prompt else None,
+                prompt_chars=len(prompt) if prompt else None,
             ))
 
     def _follow_command(self, cmd: List[str]) -> None:

@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from vllmpytop.config import HISTORY_LEN
 from vllmpytop.state import (
     GpuSnapshot,
@@ -103,6 +105,21 @@ def test_history_rate_from_two_samples():
     assert h.derived["running"] == 2.0
     assert h.derived["gpu_util"] == 20.0
     assert h.series["gen_tok_s"].values() == [0.0, 100.0]
+
+
+def test_window_avg_seeds_then_converges():
+    # The first sample seeds all three windows to the current value (no cold
+    # ramp from zero), then each EMA decays toward the new value at its own
+    # rate: 1m converges fastest, 15m slowest.
+    h = History(HISTORY_LEN)
+    h.update(_snap(0.0, 0.0, 1, 50.0))
+    assert h.avg["gpu_util"] == [50.0, 50.0, 50.0]
+    for i in range(1, 400):
+        h.update(_snap(float(i), 0.0, 1, 80.0))
+    one, five, fifteen = h.avg["gpu_util"]
+    # Headed from 50 toward 80; shorter windows are further along.
+    assert one > five > fifteen > 50.0
+    assert one == pytest.approx(80.0, abs=0.5)
 
 
 def test_braille_chart_shape():

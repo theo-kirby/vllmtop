@@ -155,6 +155,7 @@ class MergedLogEntry:
     request_id: Optional[str] = None
     max_tokens: Optional[int] = None
     prompt: Optional[str] = None
+    prompt_chars: Optional[int] = None  # logged prompt length in characters
 
     @property
     def ok(self) -> bool:
@@ -263,7 +264,13 @@ class History:
 
     Call :meth:`update` with each new :class:`Snapshot`; it computes derived
     quantities against the previous snapshot and appends them to the series.
+    Alongside the raw series it keeps load-average-style exponential moving
+    averages over three time horizons (1/5/15 minutes), in :attr:`avg`.
     """
+
+    # Time constants (seconds) for the 1/5/15-minute windowed averages, in the
+    # order they're stored in :attr:`avg`. EMA decay matches Unix loadavg.
+    WINDOW_TAUS = (60.0, 300.0, 900.0)
 
     # Names of the series we keep, for iteration in tests/UI.
     SERIES_NAMES = (
@@ -294,6 +301,12 @@ class History:
         self._prev: Optional[Snapshot] = None
         # Latest derived scalars for big-number / hbar display.
         self.derived: Dict[str, float] = {name: 0.0 for name in self.SERIES_NAMES}
+        # 1/5/15-minute EMAs per series: avg[name] == [ema_1m, ema_5m, ema_15m].
+        self.avg: Dict[str, List[float]] = {
+            name: [0.0] * len(self.WINDOW_TAUS) for name in self.SERIES_NAMES
+        }
+        self._avg_seeded = False
+        self._avg_t: Optional[float] = None
 
     def update(self, snap: Snapshot) -> None:
         prev = self._prev
@@ -344,8 +357,34 @@ class History:
         self._set("gpu_temp", g.temperature)
         self._set("gpu_power", g.power_usage)
 
+        self._update_windows(snap.monotonic)
         self._prev = snap
 
     def _set(self, name: str, value: float) -> None:
         self.series[name].append(value)
         self.derived[name] = value
+
+    def _update_windows(self, now: float) -> None:
+        """Fold the latest derived values into the 1/5/15-minute EMAs.
+
+        The first sample seeds every window to the current value (so gauges
+        don't spend 15 minutes ramping from zero); subsequent samples decay
+        toward the new value with ``alpha = 1 - exp(-dt/tau)``, which keeps the
+        averaging correct under a variable poll interval.
+        """
+        if not self._avg_seeded:
+            for name in self.SERIES_NAMES:
+                self.avg[name] = [self.derived[name]] * len(self.WINDOW_TAUS)
+            self._avg_seeded = True
+            self._avg_t = now
+            return
+        dt = now - (self._avg_t if self._avg_t is not None else now)
+        self._avg_t = now
+        if dt <= 0:
+            return
+        alphas = [1.0 - math.exp(-dt / tau) for tau in self.WINDOW_TAUS]
+        for name in self.SERIES_NAMES:
+            val = self.derived[name]
+            emas = self.avg[name]
+            for i, a in enumerate(alphas):
+                emas[i] += a * (val - emas[i])
