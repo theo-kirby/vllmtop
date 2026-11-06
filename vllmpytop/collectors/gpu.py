@@ -21,6 +21,20 @@ def _decode(name) -> Optional[str]:
     return name
 
 
+def _optional(fn):
+    """Call an NVML getter, mapping "not supported" to ``None``.
+
+    Devices legitimately lack individual metrics — e.g. GB10 (Grace Blackwell)
+    has unified memory and no fan, so NVML reports NOT_SUPPORTED for framebuffer
+    memory, fans and power limits. Those gaps must not sink the whole snapshot;
+    real errors still propagate to the caller.
+    """
+    try:
+        return fn()
+    except pynvml.NVMLError_NotSupported:
+        return None
+
+
 class GpuCollector:
     """Initialises NVML once and returns a GPU snapshot per poll.
 
@@ -53,34 +67,51 @@ class GpuCollector:
             return GpuSnapshot(available=False, error=self._init_error)
 
         h = self._handle
-        snap = GpuSnapshot(available=True, name=self._name)
+        # Utilization drives the panel's primary chart, so losing it makes the
+        # snapshot meaningless; every other metric is optional and degrading
+        # independently (see ``_optional``).
         try:
             util = pynvml.nvmlDeviceGetUtilizationRates(h)
-            snap.util_gpu = float(util.gpu)
-            snap.util_mem = float(util.memory)
+        except Exception as exc:
+            return GpuSnapshot(available=False, error=f"NVML poll failed: {exc}",
+                               name=self._name)
 
-            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
-            snap.mem_used = float(mem.used)
-            snap.mem_total = float(mem.total)
+        snap = GpuSnapshot(available=True, name=self._name,
+                           util_gpu=float(util.gpu),
+                           util_mem=float(util.memory))
+        try:
+            mem = _optional(lambda: pynvml.nvmlDeviceGetMemoryInfo(h))
+            if mem is not None:
+                snap.mem_used = float(mem.used)
+                snap.mem_total = float(mem.total)
 
-            snap.temperature = float(
-                pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+            temp = _optional(
+                lambda: pynvml.nvmlDeviceGetTemperature(
+                    h, pynvml.NVML_TEMPERATURE_GPU)
             )
+            if temp is not None:
+                snap.temperature = float(temp)
+
             # Power values come back in milliwatts.
-            snap.power_usage = pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0
-            try:
-                snap.power_limit = (
-                    pynvml.nvmlDeviceGetEnforcedPowerLimit(h) / 1000.0
-                )
-            except Exception:
-                snap.power_limit = 0.0
-            snap.sm_clock = float(
-                pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM)
+            power = _optional(lambda: pynvml.nvmlDeviceGetPowerUsage(h))
+            if power is not None:
+                snap.power_usage = power / 1000.0
+
+            limit = _optional(
+                lambda: pynvml.nvmlDeviceGetEnforcedPowerLimit(h)
             )
-            try:
-                snap.fan_speed = float(pynvml.nvmlDeviceGetFanSpeed(h))
-            except Exception:
-                snap.fan_speed = 0.0
+            if limit is not None:
+                snap.power_limit = limit / 1000.0
+
+            clock = _optional(
+                lambda: pynvml.nvmlDeviceGetClockInfo(h, pynvml.NVML_CLOCK_SM)
+            )
+            if clock is not None:
+                snap.sm_clock = float(clock)
+
+            fan = _optional(lambda: pynvml.nvmlDeviceGetFanSpeed(h))
+            if fan is not None:
+                snap.fan_speed = float(fan)
         except Exception as exc:
             return GpuSnapshot(available=False, error=f"NVML poll failed: {exc}",
                                name=self._name)

@@ -116,19 +116,26 @@ class GpuSnapshot:
     name: Optional[str] = None
     util_gpu: float = 0.0  # percent
     util_mem: float = 0.0  # percent (memory-controller utilisation)
-    mem_used: float = 0.0  # bytes
-    mem_total: float = 0.0  # bytes
-    temperature: float = 0.0  # deg C
-    power_usage: float = 0.0  # watts
-    power_limit: float = 0.0  # watts
-    sm_clock: float = 0.0  # MHz
-    fan_speed: float = 0.0  # percent
+    # Everything below is ``None`` when the device does not expose the metric
+    # (NVML NOT_SUPPORTED), e.g. unified-memory GB10 has no framebuffer stats,
+    # fan and enforced power limit.
+    mem_used: Optional[float] = None  # bytes
+    mem_total: Optional[float] = None  # bytes
+    temperature: Optional[float] = None  # deg C
+    power_usage: Optional[float] = None  # watts
+    power_limit: Optional[float] = None  # watts
+    sm_clock: Optional[float] = None  # MHz
+    fan_speed: Optional[float] = None  # percent
+
+    @property
+    def has_mem(self) -> bool:
+        return bool(self.mem_total) and self.mem_used is not None
 
     @property
     def mem_used_perc(self) -> float:
-        if self.mem_total <= 0:
+        if not self.has_mem:
             return 0.0
-        return 100.0 * self.mem_used / self.mem_total
+        return 100.0 * (self.mem_used or 0.0) / (self.mem_total or 1.0)
 
 
 @dataclass
@@ -171,6 +178,9 @@ class Snapshot:
     gpu: GpuSnapshot
     merged_log: List[MergedLogEntry] = field(default_factory=list)
     access_error: Optional[str] = None
+    # Label of the configured log source (file/container), or None when no
+    # source is configured — the requests panel uses it to say what's missing.
+    access_source: Optional[str] = None
 
 
 def compute_rate(
@@ -352,10 +362,12 @@ class History:
         self._set("kv_cache", v.kv_cache_usage_perc * 100.0)
 
         # --- GPU gauges ---
+        # Optional metrics fall back to 0 in the history series; the panels read
+        # the snapshot to label unsupported metrics as n/a.
         self._set("gpu_util", g.util_gpu)
         self._set("gpu_mem_perc", g.mem_used_perc)
-        self._set("gpu_temp", g.temperature)
-        self._set("gpu_power", g.power_usage)
+        self._set("gpu_temp", g.temperature or 0.0)
+        self._set("gpu_power", g.power_usage or 0.0)
 
         self._update_windows(snap.monotonic)
         self._prev = snap

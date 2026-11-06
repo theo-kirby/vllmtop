@@ -350,18 +350,41 @@ def draw_gpu(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         p.text(y, rx, value[:rw], t.attr(pair))
 
     # GPU rows (top half, rows 0 .. mid-1).
-    temp_pair = t.threshold(g.temperature, 70, 85)
+    temp_pair = (t.threshold(g.temperature, 70, 85)
+                 if g.temperature is not None else PAIR_DIM)
     pwr_frac = (100.0 * g.power_usage / g.power_limit
-                if g.power_limit > 0 else 0.0)
+                if g.power_usage is not None and g.power_limit else 0.0)
+
+    def mem_row(y: int) -> None:
+        if g.has_mem:
+            bar_row(y, "vram ", g.mem_used_perc)
+        else:  # e.g. unified memory (GB10): no NVML framebuffer stats
+            text_row(y, "vram  n/a")
+
+    def pwr_row(y: int) -> None:
+        if g.power_usage is None:
+            text_row(y, "pwr   n/a")
+        elif g.power_limit:
+            bar_row(y, "pwr  ", pwr_frac)
+        else:  # drawable power, but no enforced limit to scale against
+            text_row(y, f"pwr   {g.power_usage:.0f} W")
+
+    def thermal_row(y: int) -> None:
+        parts = []
+        if g.temperature is not None:
+            parts.append(f"{g.temperature:.0f}°C")
+        if g.sm_clock is not None:
+            parts.append(f"{g.sm_clock:.0f}MHz")
+        if g.fan_speed is not None:
+            parts.append(f"fan {g.fan_speed:.0f}%")
+        text_row(y, "  ".join(parts) or "n/a", temp_pair)
 
     gpu_rows = [
         lambda y: text_row(y, g.name or "GPU", PAIR_TITLE),
         lambda y: bar_row(y, "util ", g.util_gpu),
-        lambda y: bar_row(y, "vram ", g.mem_used_perc),
-        lambda y: bar_row(y, "pwr  ", pwr_frac),
-        lambda y: text_row(y,
-                           f"{g.temperature:.0f}°C  fan {g.fan_speed:.0f}%",
-                           temp_pair),
+        mem_row,
+        pwr_row,
+        thermal_row,
     ]
 
     for i, draw in enumerate(gpu_rows):
@@ -513,8 +536,9 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
     """Request feed panel — live list of vLLM inference requests.
 
     Each row shows request age, prompt text (truncated), request ID, and
-    max_tokens. Prompt text requires vLLM ≥ 0.11.3 with ``--enable-log-requests``.
-    Without a log source, a hint tells you how to enable the feed. Newest first.
+    max_tokens. Prompt text requires vLLM ≥ 0.11.3 with ``--enable-log-requests``
+    (DEBUG-only on vLLM 0.13+). An empty feed explains what is missing: the log
+    source, or the flag. Newest first.
     """
     t = p.theme
     inner = p.box(rect, "requests", num, title2="activity",
@@ -524,7 +548,8 @@ def draw_requests(p: Painter, rect: Rect, snap: Snapshot, hist: History,
 
     p.text(inner.y, inner.x, _H * inner.w, t.attr(PAIR_DIV))
     feed_rect = Rect(inner.y + 1, inner.x, inner.h - 1, inner.w)
-    _draw_request_feed(p, feed_rect, snap.merged_log, snap.access_error)
+    _draw_request_feed(p, feed_rect, snap.merged_log, snap.access_error,
+                       snap.access_source)
 
 
 def _draw_perf_stacked(p: Painter, inner: Rect, hist: History,
@@ -702,8 +727,14 @@ def draw_loadavg(p: Painter, rect: Rect, snap: Snapshot, hist: History,
         p.text(y, inner.x, label[:label_w], t.attr(PAIR_DIM))
         emas = hist.avg.get(key) or [0.0, 0.0, 0.0]
         values = (hist.derived.get(key, 0.0), emas[0], emas[1], emas[2])
+        # A metric the device never reports (e.g. framebuffer memory on
+        # unified-memory parts) must read as n/a, not as a zero.
+        missing = key == "gpu_mem_perc" and not snap.gpu.has_mem
         for i, v in enumerate(values):
-            s = fmt_seconds(v) if is_lat else big_number(v)
+            if missing:
+                s = "n/a"
+            else:
+                s = fmt_seconds(v) if is_lat else big_number(v)
             cell(y, i, s, PAIR_TITLE if i == 0 else PAIR_DIM, i == 0)
 
 
@@ -738,7 +769,8 @@ def _fmt_chars(n: int) -> str:
     return str(n)
 
 
-def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
+def _draw_request_feed(p: Painter, rect: Rect, entries, error=None,
+                       source=None) -> None:
     """Render the vLLM inference request feed into ``rect`` — no box.
 
     Each row is one request parsed from vLLM's request log
@@ -752,7 +784,11 @@ def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
     ``age`` is how long ago the request was observed. ``req id`` flexes to fill
     the available width. ``size`` is the logged prompt length in characters
     (exact, not a token count), and ``max_tok`` is the output cap; both are
-    fixed-width on the right and drop off as the panel narrows.
+    fixed-width on the right and drop off as the panel narrows. ``size`` stays
+    ``—`` when the server logs the prompt at DEBUG only (vLLM 0.13+).
+
+    ``source`` is the configured log source label; ``None`` means vllmtop is
+    tailing nothing, which is the only reason the feed can never fill.
     """
     t = p.theme
     if rect.h <= 0 or rect.w <= 0:
@@ -761,8 +797,12 @@ def _draw_request_feed(p: Painter, rect: Rect, entries, error=None) -> None:
         p.text(rect.y, rect.x, ("⚠ " + error)[: rect.w],
                t.attr(PAIR_YELLOW, dim=True))
         return
+    if source is None:
+        hint = "no log source — pass --docker <container> or --log-file <path>"
+        p.text(rect.y, rect.x, hint[: rect.w], t.attr(PAIR_DIM, dim=True))
+        return
     if not entries:
-        hint = "run vLLM with --enable-log-requests to show inference requests"
+        hint = f"no requests yet from {source} (--enable-log-requests?)"
         p.text(rect.y, rect.x, hint[: rect.w], t.attr(PAIR_DIM, dim=True))
         return
 
