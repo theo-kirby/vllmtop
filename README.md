@@ -41,8 +41,9 @@ vllmtop                  # or vllmpytop
   process list). When a log source is configured (`--docker <container>` or
   `--log-file <path>`) and vLLM runs with `--enable-log-requests`, each row
   shows the request age, request ID, prompt size (logged prompt length in
-  characters — exact, not a token count), and max_tokens. With no log source, a
-  hint reminds you to enable one.
+  characters — exact, not a token count), and max_tokens. With no log source the
+  panel says so and names the flags to pass. vLLM 0.13+ logs the prompt at
+  DEBUG only, so there the size column shows `—`.
 - **Perf** (recent average over the last poll interval — far more useful live
   than the cumulative average): TTFT, inter-token (TPOT), end-to-end, and queue
   latencies as colour-coded braille sparklines, each with a right-aligned value
@@ -124,6 +125,11 @@ Each view is a fixed layout of panels. The **1·5·15** view shows
 load-average-style 1-, 5- and 15-minute moving averages of the key metrics
 beside their current values. Panels a host can't supply (e.g. the GPU panel on
 a CPU-only box) drop out automatically and the rest reflow to fill the space.
+Individual metrics a device doesn't expose are labelled `n/a` rather than
+reported as zero — e.g. unified-memory parts such as GB10 have no NVML
+framebuffer stats, fan or enforced power limit, so the GPU panel shows
+utilisation, temperature, power draw and SM clock and marks the rest `n/a`
+(`--dump-json` reports those fields as `null`).
 
 ### Headless smoke test
 

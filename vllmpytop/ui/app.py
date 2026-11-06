@@ -56,8 +56,10 @@ class Poller(threading.Thread):
         )
         merged = self.tailer.merged_log() if self.tailer is not None else []
         err = self.tailer.error if self.tailer is not None else None
+        src = self.tailer.source_label if self.tailer is not None else None
         return Snapshot(monotonic=time.monotonic(), vllm=self.vllm.poll(),
-                        gpu=gsnap, merged_log=merged, access_error=err)
+                        gpu=gsnap, merged_log=merged, access_error=err,
+                        access_source=src)
 
     def run(self) -> None:
         while not self._stop.is_set():
